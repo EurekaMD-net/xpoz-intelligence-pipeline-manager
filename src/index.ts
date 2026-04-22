@@ -1,105 +1,179 @@
 /**
  * Xpoz Intelligence Pipeline — Entry Point
  *
- * Runs the full Phase 1 pipeline:
- *   Ingest → Normalize → Report
+ * Phase 2: Ingest → Normalize → Persist → Delta → Report
  *
  * Usage:
- *   npx tsx src/index.ts
- *   npx tsx src/index.ts --output json   (saves output/run-<timestamp>.json)
- *   npx tsx src/index.ts --output md     (saves output/run-<timestamp>.md)
+ *   npx tsx src/index.ts                    # console output
+ *   npx tsx src/index.ts --output json      # saves output/run-<id>.json
+ *   npx tsx src/index.ts --output md        # saves output/run-<id>.md
+ *   npx tsx src/index.ts --output both      # saves both
+ *   npx tsx src/index.ts --history          # list past runs
  */
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ingestAll } from "./ingest/ingestor.js";
 import { normalize } from "./transform/normalizer.js";
-import type { Topic } from "./transform/normalizer.js";
+import {
+  insertRun,
+  insertTopicsForRun,
+  getPreviousRun,
+  getTopicsForRun,
+  getAllRuns,
+} from "./store/queries.js";
+import { closeDb } from "./store/db.js";
+import { computeDelta } from "./analyze/delta.js";
+import { renderMarkdown, renderJson } from "./report/formatter.js";
 
 // ─── CLI args ─────────────────────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
-const outputArg = args.includes("--output") ? args[args.indexOf("--output") + 1] : "console";
+const outputArg = args.includes("--output")
+  ? args[args.indexOf("--output") + 1]
+  : "console";
+const showHistory = args.includes("--history");
 
-// ─── Markdown Report ──────────────────────────────────────────────────────────
+// ─── History mode ─────────────────────────────────────────────────────────────
 
-function renderMarkdown(topics: Topic[], stats: Record<string, number>, durationMs: number): string {
-  const now = new Date().toISOString().split("T")[0];
-  const lines: string[] = [
-    `# Reddit Intelligence Report — ${now}`,
-    ``,
-    `> Pipeline: Xpoz API · Phase 1 · ${durationMs}ms`,
-    `> Posts ingested: ${stats.rawPostCount} raw → ${stats.afterDedup} unique · ${stats.topicCount} clusters found`,
-    ``,
-    `## 🔥 Top 10 Topics`,
-    ``,
-  ];
-
-  for (const topic of topics) {
-    lines.push(`### #${topic.rank} — ${topic.title}`);
-    lines.push(`**Score agregado:** ${topic.aggregateScore} | **Posts:** ${topic.posts.length}`);
-    lines.push(`**Subreddits:** ${topic.subreddits.map((s) => `r/${s}`).join(", ")}`);
-    lines.push(``);
-    lines.push(`**Post representativo:** [${topic.representative.title}](${topic.representative.url})`);
-    lines.push(`↳ Score: ${topic.representative.score} · by u/${topic.representative.author}`);
-    lines.push(``);
-    if (topic.posts.length > 1) {
-      lines.push(`**Otros posts del cluster:**`);
-      for (const p of topic.posts.slice(1, 4)) {
-        lines.push(`- [${p.title}](${p.url}) — score: ${p.score}`);
-      }
-    }
-    lines.push(``);
-    lines.push(`---`);
-    lines.push(``);
+function printHistory(): void {
+  const runs = getAllRuns();
+  if (runs.length === 0) {
+    console.log("No runs yet. Run the pipeline first.");
+    return;
   }
 
-  return lines.join("\n");
+  console.log("\n═══ Run History ═══════════════════════════════════");
+  console.log(
+    "ID".padEnd(6) +
+    "Date".padEnd(14) +
+    "Posts".padEnd(10) +
+    "Unique".padEnd(10) +
+    "Topics".padEnd(10) +
+    "Duration"
+  );
+  console.log("─".repeat(62));
+  for (const run of runs) {
+    console.log(
+      String(run.id).padEnd(6) +
+      run.started_at.substring(0, 10).padEnd(14) +
+      String(run.raw_post_count).padEnd(10) +
+      String(run.unique_post_count).padEnd(10) +
+      String(run.topic_count).padEnd(10) +
+      `${run.duration_ms}ms`
+    );
+  }
+  console.log("═══════════════════════════════════════════════════\n");
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
+  if (showHistory) {
+    printHistory();
+    closeDb();
+    return;
+  }
+
   console.log("═══════════════════════════════════════════════════");
-  console.log("  Xpoz Intelligence Pipeline — Phase 1 Run");
+  console.log("  Xpoz Intelligence Pipeline — Phase 2 Run");
   console.log("═══════════════════════════════════════════════════");
+
+  const startedAt = new Date().toISOString();
 
   // 1. Ingest
+  console.log("\n[1/4] Ingesting from Xpoz...");
   const ingestSummary = await ingestAll();
+  console.log(
+    `      ✓ ${ingestSummary.totalFetched} posts fetched in ${ingestSummary.durationMs}ms` +
+    (ingestSummary.totalErrors > 0 ? ` (${ingestSummary.totalErrors} errors)` : "")
+  );
 
   // 2. Normalize
+  console.log("\n[2/4] Normalizing + clustering...");
   const normalized = normalize(ingestSummary.results);
+  console.log(
+    `      ✓ ${normalized.stats.rawPostCount} raw → ${normalized.stats.afterDedup} unique → ${normalized.stats.topicCount} topics`
+  );
 
-  // 3. Output
-  const md = renderMarkdown(normalized.topics, normalized.stats, ingestSummary.durationMs);
+  // 3. Persist
+  console.log("\n[3/4] Persisting to SQLite...");
+  const runId = insertRun({
+    started_at: startedAt,
+    duration_ms: ingestSummary.durationMs,
+    raw_post_count: normalized.stats.rawPostCount,
+    unique_post_count: normalized.stats.afterDedup,
+    topic_count: normalized.topics.length,
+  });
+
+  insertTopicsForRun(runId, normalized.topics);
+
+  // Fetch previous run for delta
+  const previousRun = getPreviousRun(runId);
+  const previousTopics = previousRun ? getTopicsForRun(previousRun.id) : null;
+  console.log(
+    previousRun
+      ? `      ✓ Run #${runId} saved. Comparing with Run #${previousRun.id}`
+      : `      ✓ Run #${runId} saved. (first run — no delta available)`
+  );
+
+  // 4. Delta + Report
+  console.log("\n[4/4] Computing delta + rendering report...");
+  const delta = computeDelta(normalized.topics, previousTopics);
+
+  const reportInput = {
+    delta,
+    runId,
+    durationMs: ingestSummary.durationMs,
+    rawPostCount: normalized.stats.rawPostCount,
+    uniquePostCount: normalized.stats.afterDedup,
+    previousRun,
+  };
+
+  const md = renderMarkdown(reportInput);
+  const json = renderJson(reportInput);
 
   if (outputArg === "json" || outputArg === "both") {
     await mkdir("output", { recursive: true });
-    const filename = join("output", `run-${Date.now()}.json`);
-    await writeFile(filename, JSON.stringify({ topics: normalized.topics, stats: normalized.stats, ingestSummary }, null, 2));
-    console.log(`\n📁 JSON saved: ${filename}`);
+    const filename = join("output", `run-${runId}.json`);
+    await writeFile(filename, JSON.stringify(json, null, 2));
+    console.log(`      ✓ JSON saved: ${filename}`);
   }
 
   if (outputArg === "md" || outputArg === "both") {
     await mkdir("output", { recursive: true });
-    const filename = join("output", `run-${Date.now()}.md`);
+    const filename = join("output", `run-${runId}.md`);
     await writeFile(filename, md);
-    console.log(`\n📁 Markdown saved: ${filename}`);
+    console.log(`      ✓ Markdown saved: ${filename}`);
   }
 
-  // Always print to console
   console.log("\n" + md);
 
-  // Exit summary
   console.log("═══════════════════════════════════════════════════");
-  console.log(`  ✅ Done — ${normalized.topics.length} topics · ${ingestSummary.totalFetched} posts · ${ingestSummary.durationMs}ms`);
-  if (ingestSummary.totalErrors > 0) {
-    console.log(`  ⚠️  ${ingestSummary.totalErrors} fetch errors (see logs above)`);
+  if (previousRun) {
+    console.log(
+      `  ✅ Run #${runId} complete — ${DELTA_ICONS(delta)} vs Run #${previousRun.id}`
+    );
+  } else {
+    console.log(`  ✅ Run #${runId} complete — ${normalized.topics.length} topics (baseline)`);
   }
-  console.log("═══════════════════════════════════════════════════");
+  console.log("═══════════════════════════════════════════════════\n");
+
+  closeDb();
+}
+
+function DELTA_ICONS(d: ReturnType<typeof computeDelta>): string {
+  const parts: string[] = [];
+  if (d.newCount) parts.push(`🆕 ${d.newCount} new`);
+  if (d.upCount) parts.push(`📈 ${d.upCount} up`);
+  if (d.downCount) parts.push(`📉 ${d.downCount} down`);
+  if (d.stableCount) parts.push(`➡️ ${d.stableCount} stable`);
+  if (d.disappearedCount) parts.push(`🕳️ ${d.disappearedCount} gone`);
+  return parts.join(" · ");
 }
 
 main().catch((err) => {
   console.error("Fatal error:", err);
+  closeDb();
   process.exit(1);
 });

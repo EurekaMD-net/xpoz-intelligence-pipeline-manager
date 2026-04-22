@@ -8,8 +8,11 @@
     "typecheck": "tsc --noEmit",
     "run:pipeline": "tsx src/index.ts"
   },
-  "dependencies": {},
+  "dependencies": {
+    "better-sqlite3": "^12.9.0"
+  },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
