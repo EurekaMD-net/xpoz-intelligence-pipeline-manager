@@ -12,10 +12,14 @@
     "daemon": "tsx src/index.ts --daemon --notify",
     "serve": "tsx src/index.ts --serve",
     "serve:all": "tsx src/index.ts --serve --daemon --notify",
-    "history": "tsx src/index.ts --history"
+    "history": "tsx src/index.ts --history",
+    "mcp": "tsx mcp-server.ts",
+    "build": "tsc",
+    "build:mcp": "tsc && echo 'MCP server compiled to dist/mcp-server.js'"
   },
   "dependencies": {
     "@hono/node-server": "^2.0.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/node-cron": "^3.0.11",
     "better-sqlite3": "^12.9.0",
     "hono": "^4.12.14",

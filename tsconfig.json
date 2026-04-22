@@ -11,6 +11,6 @@
     "skipLibCheck": true,
     "resolveJsonModule": true
   },
-  "include": ["src/**/*", "config.ts"],
+  "include": ["src/**/*", "config.ts", "mcp-server.ts"],
   "exclude": ["node_modules", "dist", "output"]
 }
