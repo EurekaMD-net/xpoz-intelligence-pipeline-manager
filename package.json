@@ -10,11 +10,15 @@
     "run:notify": "tsx src/index.ts --output both --notify",
     "run:force": "tsx src/index.ts --output both --notify --force",
     "daemon": "tsx src/index.ts --daemon --notify",
+    "serve": "tsx src/index.ts --serve",
+    "serve:all": "tsx src/index.ts --serve --daemon --notify",
     "history": "tsx src/index.ts --history"
   },
   "dependencies": {
+    "@hono/node-server": "^2.0.0",
     "@types/node-cron": "^3.0.11",
     "better-sqlite3": "^12.9.0",
+    "hono": "^4.12.14",
     "node-cron": "^4.2.1"
   },
   "devDependencies": {

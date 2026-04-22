@@ -1,0 +1,28 @@
+[Unit]
+Description=Xpoz Intelligence Pipeline — Reddit Signal Monitor
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/claude/projects/xpoz-pipeline
+Environment=NODE_ENV=production
+Environment=TZ=America/Mexico_City
+
+# Load Telegram credentials from environment
+EnvironmentFile=-/root/claude/projects/xpoz-pipeline/.env
+
+ExecStart=/usr/bin/npx tsx src/index.ts --serve --daemon --notify
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=xpoz-pipeline
+
+# Graceful stop
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -1,7 +1,7 @@
 /**
  * Xpoz Intelligence Pipeline — Entry Point
  *
- * Phase 3: Added --notify, --force, --daemon modes + Telegram integration
+ * Phase 4: Added --serve mode (HTTP API on port 8086) + Jarvis integration
  *
  * Usage:
  *   npx tsx src/index.ts                         # console output (default)
@@ -13,6 +13,8 @@
  *   npx tsx src/index.ts --daemon                # start cron loop (07:00 CDMX daily)
  *   npx tsx src/index.ts --daemon --notify       # cron + Telegram on new/up topics
  *   npx tsx src/index.ts --daemon --notify --force # cron + always send
+ *   npx tsx src/index.ts --serve                 # start HTTP API on port 8086
+ *   npx tsx src/index.ts --serve --daemon --notify # API + cron + notifications
  *   npx tsx src/index.ts --history               # list past runs
  */
 
@@ -20,6 +22,7 @@ import { getAllRuns } from "./store/queries.js";
 import { closeDb } from "./store/db.js";
 import { runPipeline } from "./pipeline.js";
 import { startDaemon } from "./scheduler/cron.js";
+import { startApiServer } from "./api/server.js";
 
 // ─── CLI args ─────────────────────────────────────────────────────────────────
 
@@ -36,6 +39,10 @@ const forceMode = args.includes("--force");
 const cronArg = args.includes("--cron")
   ? args[args.indexOf("--cron") + 1]
   : undefined;
+const serveMode = args.includes("--serve");
+const portArg = args.includes("--port")
+  ? parseInt(args[args.indexOf("--port") + 1], 10)
+  : 8086;
 
 // ─── History mode ─────────────────────────────────────────────────────────────
 
@@ -75,6 +82,20 @@ async function main(): Promise<void> {
   if (showHistory) {
     printHistory();
     closeDb();
+    return;
+  }
+
+  // Serve mode: start HTTP API (optionally combined with daemon)
+  if (serveMode) {
+    startApiServer(portArg);
+    if (daemonMode) {
+      // API + cron: start both
+      await startDaemon({ notify: notifyMode, force: forceMode, cron: cronArg });
+    } else {
+      // API only: keep process alive
+      console.log("[serve] API running. Press Ctrl+C to stop.");
+      process.stdin.resume();
+    }
     return;
   }
 
