@@ -20,6 +20,7 @@ export interface TopicWithDelta extends Topic {
   delta: DeltaStatus;
   previousRank: number | null;
   rankChange: number | null; // positive = improved (moved up), negative = dropped
+  scoreDelta: number | null; // percentage change in aggregate_score vs previous run
 }
 
 export interface DisappearedTopic {
@@ -92,6 +93,7 @@ export function computeDelta(
       delta: "new" as DeltaStatus,
       previousRank: null,
       rankChange: null,
+      scoreDelta: null,
     }));
     return {
       topics,
@@ -126,6 +128,7 @@ export function computeDelta(
         delta: "new" as DeltaStatus,
         previousRank: null,
         rankChange: null,
+        scoreDelta: null,
       };
     }
 
@@ -136,11 +139,17 @@ export function computeDelta(
     else if (rankChange < -1) delta = "down";
     else delta = "stable";
 
+    // Score change percentage
+    const scoreDelta = prev.aggregate_score > 0
+      ? Math.round(((curr.aggregateScore - prev.aggregate_score) / prev.aggregate_score) * 100)
+      : null;
+
     return {
       ...curr,
       delta,
       previousRank: prev.rank,
       rankChange,
+      scoreDelta,
     };
   });
 

@@ -6,10 +6,16 @@
   "scripts": {
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
-    "run:pipeline": "tsx src/index.ts"
+    "run:pipeline": "tsx src/index.ts --output both",
+    "run:notify": "tsx src/index.ts --output both --notify",
+    "run:force": "tsx src/index.ts --output both --notify --force",
+    "daemon": "tsx src/index.ts --daemon --notify",
+    "history": "tsx src/index.ts --history"
   },
   "dependencies": {
-    "better-sqlite3": "^12.9.0"
+    "@types/node-cron": "^3.0.11",
+    "better-sqlite3": "^12.9.0",
+    "node-cron": "^4.2.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

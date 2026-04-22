@@ -1,38 +1,41 @@
 /**
  * Xpoz Intelligence Pipeline — Entry Point
  *
- * Phase 2: Ingest → Normalize → Persist → Delta → Report
+ * Phase 3: Added --notify, --force, --daemon modes + Telegram integration
  *
  * Usage:
- *   npx tsx src/index.ts                    # console output
- *   npx tsx src/index.ts --output json      # saves output/run-<id>.json
- *   npx tsx src/index.ts --output md        # saves output/run-<id>.md
- *   npx tsx src/index.ts --output both      # saves both
- *   npx tsx src/index.ts --history          # list past runs
+ *   npx tsx src/index.ts                         # console output (default)
+ *   npx tsx src/index.ts --output json           # save JSON to output/
+ *   npx tsx src/index.ts --output md             # save Markdown to output/
+ *   npx tsx src/index.ts --output both           # save both
+ *   npx tsx src/index.ts --notify                # run + send Telegram if new/up topics
+ *   npx tsx src/index.ts --notify --force        # run + always send Telegram
+ *   npx tsx src/index.ts --daemon                # start cron loop (07:00 CDMX daily)
+ *   npx tsx src/index.ts --daemon --notify       # cron + Telegram on new/up topics
+ *   npx tsx src/index.ts --daemon --notify --force # cron + always send
+ *   npx tsx src/index.ts --history               # list past runs
  */
 
-import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { ingestAll } from "./ingest/ingestor.js";
-import { normalize } from "./transform/normalizer.js";
-import {
-  insertRun,
-  insertTopicsForRun,
-  getPreviousRun,
-  getTopicsForRun,
-  getAllRuns,
-} from "./store/queries.js";
+import { getAllRuns } from "./store/queries.js";
 import { closeDb } from "./store/db.js";
-import { computeDelta } from "./analyze/delta.js";
-import { renderMarkdown, renderJson } from "./report/formatter.js";
+import { runPipeline } from "./pipeline.js";
+import { startDaemon } from "./scheduler/cron.js";
 
 // ─── CLI args ─────────────────────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
+
 const outputArg = args.includes("--output")
-  ? args[args.indexOf("--output") + 1]
+  ? (args[args.indexOf("--output") + 1] as "console" | "json" | "md" | "both")
   : "console";
+
 const showHistory = args.includes("--history");
+const daemonMode = args.includes("--daemon");
+const notifyMode = args.includes("--notify");
+const forceMode = args.includes("--force");
+const cronArg = args.includes("--cron")
+  ? args[args.indexOf("--cron") + 1]
+  : undefined;
 
 // ─── History mode ─────────────────────────────────────────────────────────────
 
@@ -75,101 +78,19 @@ async function main(): Promise<void> {
     return;
   }
 
-  console.log("═══════════════════════════════════════════════════");
-  console.log("  Xpoz Intelligence Pipeline — Phase 2 Run");
-  console.log("═══════════════════════════════════════════════════");
+  if (daemonMode) {
+    // Daemon: don't close DB — the cron job keeps running
+    await startDaemon({ notify: notifyMode, force: forceMode, cron: cronArg });
+    return; // process.stdin.resume() in startDaemon keeps it alive
+  }
 
-  const startedAt = new Date().toISOString();
-
-  // 1. Ingest
-  console.log("\n[1/4] Ingesting from Xpoz...");
-  const ingestSummary = await ingestAll();
-  console.log(
-    `      ✓ ${ingestSummary.totalFetched} posts fetched in ${ingestSummary.durationMs}ms` +
-    (ingestSummary.totalErrors > 0 ? ` (${ingestSummary.totalErrors} errors)` : "")
-  );
-
-  // 2. Normalize
-  console.log("\n[2/4] Normalizing + clustering...");
-  const normalized = normalize(ingestSummary.results);
-  console.log(
-    `      ✓ ${normalized.stats.rawPostCount} raw → ${normalized.stats.afterDedup} unique → ${normalized.stats.topicCount} topics`
-  );
-
-  // 3. Persist
-  console.log("\n[3/4] Persisting to SQLite...");
-  const runId = insertRun({
-    started_at: startedAt,
-    duration_ms: ingestSummary.durationMs,
-    raw_post_count: normalized.stats.rawPostCount,
-    unique_post_count: normalized.stats.afterDedup,
-    topic_count: normalized.topics.length,
+  // Single run
+  await runPipeline({
+    outputMode: outputArg,
+    notify: notifyMode,
+    force: forceMode,
+    closeDb: true,
   });
-
-  insertTopicsForRun(runId, normalized.topics);
-
-  // Fetch previous run for delta
-  const previousRun = getPreviousRun(runId);
-  const previousTopics = previousRun ? getTopicsForRun(previousRun.id) : null;
-  console.log(
-    previousRun
-      ? `      ✓ Run #${runId} saved. Comparing with Run #${previousRun.id}`
-      : `      ✓ Run #${runId} saved. (first run — no delta available)`
-  );
-
-  // 4. Delta + Report
-  console.log("\n[4/4] Computing delta + rendering report...");
-  const delta = computeDelta(normalized.topics, previousTopics);
-
-  const reportInput = {
-    delta,
-    runId,
-    durationMs: ingestSummary.durationMs,
-    rawPostCount: normalized.stats.rawPostCount,
-    uniquePostCount: normalized.stats.afterDedup,
-    previousRun,
-  };
-
-  const md = renderMarkdown(reportInput);
-  const json = renderJson(reportInput);
-
-  if (outputArg === "json" || outputArg === "both") {
-    await mkdir("output", { recursive: true });
-    const filename = join("output", `run-${runId}.json`);
-    await writeFile(filename, JSON.stringify(json, null, 2));
-    console.log(`      ✓ JSON saved: ${filename}`);
-  }
-
-  if (outputArg === "md" || outputArg === "both") {
-    await mkdir("output", { recursive: true });
-    const filename = join("output", `run-${runId}.md`);
-    await writeFile(filename, md);
-    console.log(`      ✓ Markdown saved: ${filename}`);
-  }
-
-  console.log("\n" + md);
-
-  console.log("═══════════════════════════════════════════════════");
-  if (previousRun) {
-    console.log(
-      `  ✅ Run #${runId} complete — ${DELTA_ICONS(delta)} vs Run #${previousRun.id}`
-    );
-  } else {
-    console.log(`  ✅ Run #${runId} complete — ${normalized.topics.length} topics (baseline)`);
-  }
-  console.log("═══════════════════════════════════════════════════\n");
-
-  closeDb();
-}
-
-function DELTA_ICONS(d: ReturnType<typeof computeDelta>): string {
-  const parts: string[] = [];
-  if (d.newCount) parts.push(`🆕 ${d.newCount} new`);
-  if (d.upCount) parts.push(`📈 ${d.upCount} up`);
-  if (d.downCount) parts.push(`📉 ${d.downCount} down`);
-  if (d.stableCount) parts.push(`➡️ ${d.stableCount} stable`);
-  if (d.disappearedCount) parts.push(`🕳️ ${d.disappearedCount} gone`);
-  return parts.join(" · ");
 }
 
 main().catch((err) => {
