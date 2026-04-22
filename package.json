@@ -1,0 +1,17 @@
+{
+  "name": "xpoz-intelligence-pipeline-manager",
+  "version": "0.1.0",
+  "description": "Reddit Intelligence Pipeline using Xpoz MCP API",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "run:pipeline": "tsx src/index.ts"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

@@ -1,0 +1,6 @@
+node_modules/
+dist/
+output/
+*.local.ts
+.env
+.DS_Store
