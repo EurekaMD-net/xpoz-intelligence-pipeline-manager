@@ -4,4 +4,6 @@ output/
 data/
 *.local.ts
 .env
+.env.bak.*
+.env.bak-*
 .DS_Store

@@ -5,25 +5,162 @@
  * Runs on port 8086 (localhost only — not exposed publicly).
  *
  * Endpoints:
- *   GET /health          → service status + last run info
- *   GET /runs            → list of all runs with stats
- *   GET /topics/latest   → top topics from last run (JSON)
- *   GET /digest/latest   → markdown digest from last run (text/plain)
- *   POST /run            → trigger a pipeline run on-demand
+ *   GET  /health              → service status + last run info
+ *   GET  /credits             → credit budget summary
+ *   GET  /runs                → list of all runs with stats
+ *   GET  /topics/latest       → top topics from last run (JSON)
+ *   GET  /digest/latest       → markdown digest from last run (text/plain)
+ *   POST /run                 → trigger a pipeline run; returns {jobId}
+ *   GET  /run/status          → boolean "is a run in progress" (backward-compat)
+ *   GET  /run/jobs            → list recent jobs (last 50)
+ *   GET  /run/jobs/:jobId     → status + result/error for a specific job
+ *   POST /reset               → wipe DB (auth-gated)
+ *
+ * Auth:
+ *   Mutating endpoints (POST /run, POST /reset) require header
+ *   `X-Xpoz-Token: <env.XPOZ_API_TOKEN>` when XPOZ_API_TOKEN is set.
+ *   If the env var is unset, auth is disabled (dev convenience).
  */
 
 import { Hono } from "hono";
+import type { MiddlewareHandler } from "hono";
 import { serve } from "@hono/node-server";
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
-import { getDb } from "../store/db.js";
-import { getAllRuns, getLastRun, getTopicsForRun, getCreditSummary, clearAllData } from "../store/queries.js";
+import { randomUUID, timingSafeEqual } from "crypto";
+import {
+  getAllRuns,
+  getLastRun,
+  getTopicsForRun,
+  getCreditSummary,
+  clearAllData,
+} from "../store/queries.js";
 import { runPipeline } from "../pipeline.js";
+import type { PipelineResult } from "../pipeline.js";
 import type { TopicConfig } from "../../config.js";
 
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 const app = new Hono();
+
+// ─── Auth middleware ──────────────────────────────────────────────────────────
+
+/**
+ * Read the active API token at request time — do NOT cache at module load.
+ * This lets operator scripts that re-write the .env + restart pick up the new
+ * token; also keeps the /health `authEnabled` flag honest with current env.
+ */
+function currentApiToken(): string {
+  return process.env.XPOZ_API_TOKEN ?? "";
+}
+
+/** Constant-time string compare; returns false on length mismatch. */
+function tokensEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  const ba = Buffer.from(a);
+  const bb = Buffer.from(b);
+  return timingSafeEqual(ba, bb);
+}
+
+/**
+ * Reject requests missing a valid X-Xpoz-Token header.
+ * No-op when XPOZ_API_TOKEN is not configured — allows dev-mode local testing.
+ */
+const requireToken: MiddlewareHandler = async (c, next) => {
+  const token = currentApiToken();
+  if (!token) return next(); // Dev mode: auth disabled
+  const provided = c.req.header("X-Xpoz-Token") ?? "";
+  if (!tokensEqual(provided, token)) {
+    return c.json(
+      { error: "Unauthorized — provide a valid X-Xpoz-Token header." },
+      401,
+    );
+  }
+  return next();
+};
+
+// ─── Job tracking ─────────────────────────────────────────────────────────────
+
+type JobStatus = "running" | "completed" | "failed";
+
+interface JobRecord {
+  jobId: string;
+  status: JobStatus;
+  label: string;
+  subreddits: string[];
+  keywords: string[];
+  twitterKeywords: string[];
+  startedAt: string;
+  completedAt?: string;
+  result?: PipelineResult;
+  error?: string;
+}
+
+const JOBS = new Map<string, JobRecord>();
+const MAX_JOBS = 50; // keep only last 50 in memory
+const JOB_TTL_MS = 60 * 60 * 1000; // prune jobs older than 1h
+
+function recordJob(job: JobRecord): void {
+  JOBS.set(job.jobId, job);
+  pruneJobs();
+}
+
+// Beyond this age a "running" job is considered stale (runPipeline hung
+// or crashed before flipping status). Stale jobs are promoted to "failed"
+// so pruneJobs can evict them and `/run` isn't blocked by a dead slot.
+const STALE_RUNNING_MS = 2 * 60 * 60 * 1000; // 2 hours
+
+function pruneJobs(): void {
+  const now = Date.now();
+  const cutoff = now - JOB_TTL_MS;
+  const staleCutoff = now - STALE_RUNNING_MS;
+
+  // Pass 1 — promote jobs stuck in "running" past the stale cutoff to "failed".
+  // This guards against runPipeline's timeout wrapper failing to update the
+  // record (unexpected synchronous throw inside the IIFE, GC'd promise, etc.)
+  for (const job of JOBS.values()) {
+    if (job.status === "running" && Date.parse(job.startedAt) < staleCutoff) {
+      job.status = "failed";
+      job.completedAt = new Date().toISOString();
+      job.error =
+        job.error ??
+        `job stale — no status update within ${STALE_RUNNING_MS}ms`;
+    }
+  }
+
+  // Pass 2 — TTL prune terminal jobs older than 1h.
+  for (const [id, job] of JOBS) {
+    const started = Date.parse(job.startedAt);
+    if (job.status !== "running" && started < cutoff) {
+      JOBS.delete(id);
+    }
+  }
+
+  // Pass 3 — hard cap on map size. Drop oldest terminal jobs first; if still
+  // over 2× cap with only running jobs, force-promote the oldest running ones
+  // to "failed:evicted" so memory doesn't grow unbounded under pathological
+  // load (W1 in audit).
+  if (JOBS.size > MAX_JOBS) {
+    const sorted = [...JOBS.entries()].sort(
+      (a, b) => Date.parse(a[1].startedAt) - Date.parse(b[1].startedAt),
+    );
+    for (const [id, job] of sorted) {
+      if (JOBS.size <= MAX_JOBS) break;
+      if (job.status !== "running") JOBS.delete(id);
+    }
+    if (JOBS.size > MAX_JOBS * 2) {
+      for (const [id, job] of sorted) {
+        if (JOBS.size <= MAX_JOBS) break;
+        if (job.status === "running") {
+          job.status = "failed";
+          job.completedAt = new Date().toISOString();
+          job.error = job.error ?? "evicted — job map exceeded 2× capacity";
+          JOBS.delete(id);
+        }
+      }
+    }
+  }
+}
 
 // ─── Health ───────────────────────────────────────────────────────────────────
 
@@ -51,6 +188,7 @@ app.get("/health", (c) => {
       percentUsed: credits.percentUsed,
     },
     uptime: Math.floor(process.uptime()),
+    authEnabled: !!currentApiToken(),
   });
 });
 
@@ -111,7 +249,6 @@ app.get("/digest/latest", (c) => {
 
   // Try to find the markdown file for the last run
   const outputDir = join(process.cwd(), "output");
-  const runDate = lastRun.started_at.split("T")[0];
 
   // Look for files matching run-N.md pattern
   const candidateFiles = [
@@ -122,7 +259,9 @@ app.get("/digest/latest", (c) => {
   for (const filePath of candidateFiles) {
     if (existsSync(filePath)) {
       const content = readFileSync(filePath, "utf-8");
-      return c.text(content, 200, { "Content-Type": "text/markdown; charset=utf-8" });
+      return c.text(content, 200, {
+        "Content-Type": "text/markdown; charset=utf-8",
+      });
     }
   }
 
@@ -137,7 +276,7 @@ app.get("/digest/latest", (c) => {
     "",
     ...topics.map(
       (t, i) =>
-        `${i + 1}. **${t.title}** — score: ${t.aggregate_score.toLocaleString()} (${t.post_count} posts)`
+        `${i + 1}. **${t.title}** — score: ${t.aggregate_score.toLocaleString()} (${t.post_count} posts)`,
     ),
   ];
   return c.text(lines.join("\n"), 200, {
@@ -148,71 +287,165 @@ app.get("/digest/latest", (c) => {
 // ─── On-demand run ────────────────────────────────────────────────────────────
 
 let runInProgress = false;
+// Hard cap on how long a single pipeline run is allowed to hold the flag.
+// Beyond this we stop waiting, mark the job failed, and free the slot so the
+// next request isn't blocked by a hung fetch inside the ingest layer.
+const RUN_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
 
-app.post("/run", async (c) => {
+app.post("/run", requireToken, async (c) => {
+  // Claim the in-progress slot SYNCHRONOUSLY before any await to prevent
+  // two concurrent POSTs both passing the guard and starting two pipelines.
   if (runInProgress) {
     return c.json({ error: "A run is already in progress" }, 409);
   }
+  runInProgress = true;
+  // On any early-return path below (validation errors), release the slot.
+  const releaseSlot = () => {
+    runInProgress = false;
+  };
 
-  const body = await c.req.json().catch(() => ({}));
+  let body: Record<string, unknown>;
+  try {
+    body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  } catch {
+    releaseSlot();
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+
+  // notify / force must be boolean if provided — string "true" should not
+  // silently coerce to false. Reject mixed types with 400 (W5).
+  if (body.notify !== undefined && typeof body.notify !== "boolean") {
+    releaseSlot();
+    return c.json({ error: "'notify' must be a boolean (true|false)." }, 400);
+  }
+  if (body.force !== undefined && typeof body.force !== "boolean") {
+    releaseSlot();
+    return c.json({ error: "'force' must be a boolean (true|false)." }, 400);
+  }
   const notify = body.notify === true;
   // When operator explicitly requests notify, always force-send (no delta gating)
   const force = body.force === true || notify;
 
   // Validate: at least subreddits or keywords must be provided
-  const subreddits: string[] = Array.isArray(body.subreddits) ? body.subreddits : [];
-  const keywords: string[]   = Array.isArray(body.keywords)   ? body.keywords   : [];
+  const subreddits: string[] = Array.isArray(body.subreddits)
+    ? (body.subreddits as string[])
+    : [];
+  const keywords: string[] = Array.isArray(body.keywords)
+    ? (body.keywords as string[])
+    : [];
 
-  if (subreddits.length === 0 && keywords.length === 0 && (!Array.isArray(body.twitterKeywords) || body.twitterKeywords.length === 0)) {
+  if (
+    subreddits.length === 0 &&
+    keywords.length === 0 &&
+    (!Array.isArray(body.twitterKeywords) ||
+      (body.twitterKeywords as unknown[]).length === 0)
+  ) {
+    releaseSlot();
     return c.json(
-      { error: "Run requires at least one of: 'subreddits', 'keywords', or 'twitterKeywords'." },
-      400
+      {
+        error:
+          "Run requires at least one of: 'subreddits', 'keywords', or 'twitterKeywords'.",
+      },
+      400,
     );
   }
 
   // Build TopicConfig inline from request
-  const twitterKeywords: string[] | undefined = Array.isArray(body.twitterKeywords)
-    ? body.twitterKeywords
+  const twitterKeywords: string[] | undefined = Array.isArray(
+    body.twitterKeywords,
+  )
+    ? (body.twitterKeywords as string[])
     : undefined;
 
   // allowlist: explicit array OR union of subreddits + keywords as fallback
   const allowlist: Set<string> = Array.isArray(body.allowlist)
-    ? new Set<string>(body.allowlist)
+    ? new Set<string>(body.allowlist as string[])
     : new Set<string>([...subreddits, ...keywords]);
 
-  const label: string = typeof body.label === "string" && body.label.trim()
-    ? body.label.trim()
-    : "Custom Run";
+  const label: string =
+    typeof body.label === "string" && body.label.trim()
+      ? body.label.trim()
+      : "Custom Run";
 
-  const topicConfig: TopicConfig = { label, subreddits, keywords, allowlist, twitterKeywords };
+  const topicConfig: TopicConfig = {
+    label,
+    subreddits,
+    keywords,
+    allowlist,
+    twitterKeywords,
+  };
 
-  runInProgress = true;
+  // Register job before spawning async work
+  const jobId = randomUUID();
+  const startedAt = new Date().toISOString();
+  const job: JobRecord = {
+    jobId,
+    status: "running",
+    label,
+    subreddits,
+    keywords,
+    twitterKeywords: twitterKeywords ?? [],
+    startedAt,
+  };
+  recordJob(job);
 
-  // Fire-and-forget — returns immediately, run happens async
+  // Fire-and-forget — returns immediately, run happens async.
+  // Callers poll GET /run/jobs/:jobId for status or rely on notify:true.
   (async () => {
     try {
-      console.log(`[API] On-demand run triggered via POST /run (label: "${label}")`);
-      await runPipeline({ notify, force, outputMode: "both", closeDb: false, topicConfig });
-      console.log("[API] On-demand run completed");
+      console.log(
+        `[API] Job ${jobId} — on-demand run triggered (label: "${label}")`,
+      );
+      const timeout = new Promise<never>((_, reject) =>
+        setTimeout(
+          () =>
+            reject(
+              new Error(
+                `runPipeline exceeded ${RUN_TIMEOUT_MS}ms timeout — aborting slot`,
+              ),
+            ),
+          RUN_TIMEOUT_MS,
+        ).unref(),
+      );
+      const result = await Promise.race([
+        runPipeline({
+          notify,
+          force,
+          outputMode: "both",
+          closeDb: false,
+          topicConfig,
+        }),
+        timeout,
+      ]);
+      job.status = "completed";
+      job.completedAt = new Date().toISOString();
+      job.result = result;
+      console.log(
+        `[API] Job ${jobId} — completed (run #${result.runId}, ${result.topicCount} topics)`,
+      );
     } catch (err) {
-      console.error("[API] On-demand run failed:", err);
+      job.status = "failed";
+      job.completedAt = new Date().toISOString();
+      job.error = err instanceof Error ? err.message : String(err);
+      console.error(`[API] Job ${jobId} — failed:`, err);
     } finally {
       runInProgress = false;
     }
   })();
 
   return c.json({
+    jobId,
     status: "started",
     label,
     subreddits,
     keywords,
     twitterKeywords: twitterKeywords ?? [],
-    message: "Pipeline run started. Poll GET /health or GET /topics/latest for results.",
+    message: `Pipeline run started. Poll GET /run/jobs/${jobId} for status.`,
     estimatedDurationSec: 90,
   });
 });
 
-// ─── Run status ───────────────────────────────────────────────────────────────
+// ─── Run status (backward-compat: boolean) ────────────────────────────────────
 
 app.get("/run/status", (c) => {
   return c.json({
@@ -220,14 +453,35 @@ app.get("/run/status", (c) => {
   });
 });
 
+// ─── Jobs ─────────────────────────────────────────────────────────────────────
+
+app.get("/run/jobs", (c) => {
+  pruneJobs();
+  const jobs = [...JOBS.values()].sort(
+    (a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt),
+  );
+  return c.json({ count: jobs.length, jobs });
+});
+
+app.get("/run/jobs/:jobId", (c) => {
+  const jobId = c.req.param("jobId");
+  const job = JOBS.get(jobId);
+  if (!job) {
+    return c.json({ error: `Job ${jobId} not found` }, 404);
+  }
+  return c.json(job);
+});
+
 // ─── Reset ────────────────────────────────────────────────────────────────────
 
-app.post("/reset", (c) => {
+app.post("/reset", requireToken, (c) => {
   if (runInProgress) {
     return c.json({ error: "A run is in progress — cannot reset now" }, 409);
   }
   const result = clearAllData();
-  console.log(`[API] /reset called — cleared ${result.deletedRuns} runs, ${result.deletedTopics} topics, ${result.deletedPosts} posts`);
+  console.log(
+    `[API] /reset called — cleared ${result.deletedRuns} runs, ${result.deletedTopics} topics, ${result.deletedPosts} posts`,
+  );
   return c.json({
     cleared: true,
     tables: ["runs", "topics", "topic_posts"],
@@ -238,7 +492,18 @@ app.post("/reset", (c) => {
 // ─── Start server ─────────────────────────────────────────────────────────────
 
 export function startApiServer(port = 8086): void {
+  if (!currentApiToken()) {
+    console.warn(
+      "[API] XPOZ_API_TOKEN not set — auth is DISABLED. Set it in .env for production.",
+    );
+  } else {
+    console.log(
+      `[API] Auth enabled — X-Xpoz-Token required on POST /run and POST /reset.`,
+    );
+  }
   serve({ fetch: app.fetch, port }, () => {
-    console.log(`[API] Xpoz Intelligence Pipeline API listening on port ${port}`);
+    console.log(
+      `[API] Xpoz Intelligence Pipeline API listening on port ${port}`,
+    );
   });
 }

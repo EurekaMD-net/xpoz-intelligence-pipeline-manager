@@ -48,6 +48,15 @@ export interface TopicRow {
 
 // ─── Runs ─────────────────────────────────────────────────────────────────────
 
+/**
+ * Retention: keep the last N runs (and their topics + topic_posts). Older
+ * runs are deleted in a single transaction. Default 90 runs = ~3 months of
+ * daily ingest, which is enough history for delta trend analysis without
+ * letting the SQLite file grow unbounded now that clearAllData() has been
+ * removed from the pipeline's step-0 (see audit M4).
+ */
+export const DEFAULT_RETENTION_KEEP = 90;
+
 export function insertRun(params: Omit<RunRow, "id">): number {
   const db = getDb();
   const stmt = db.prepare(`
@@ -55,12 +64,72 @@ export function insertRun(params: Omit<RunRow, "id">): number {
     VALUES (@started_at, @duration_ms, @raw_post_count, @unique_post_count, @topic_count, @credits_used, @queries_count)
   `);
   const result = stmt.run(params);
-  return result.lastInsertRowid as number;
+  const runId = result.lastInsertRowid as number;
+  // Retention is cheap (bounded by keepN) and ensures the DB doesn't grow
+  // indefinitely. Errors are swallowed — the insert itself must not fail.
+  try {
+    pruneOldRuns(DEFAULT_RETENTION_KEEP);
+  } catch (err) {
+    console.warn(
+      `[queries] pruneOldRuns failed (non-fatal):`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+  return runId;
+}
+
+/**
+ * Delete all runs older than the most recent `keepN` (by id, which is
+ * monotonically increasing via AUTOINCREMENT). Cascades to topics and
+ * topic_posts via explicit DELETEs (no ON DELETE CASCADE in the schema).
+ * Runs inside a transaction; returns counts.
+ */
+export function pruneOldRuns(keepN: number): {
+  deletedRuns: number;
+  deletedTopics: number;
+  deletedPosts: number;
+} {
+  const db = getDb();
+  const cutoffRow = db
+    .prepare(`SELECT id FROM runs ORDER BY id DESC LIMIT 1 OFFSET ?`)
+    .get(keepN) as { id: number } | undefined;
+  if (!cutoffRow) {
+    return { deletedRuns: 0, deletedTopics: 0, deletedPosts: 0 };
+  }
+  const cutoffId = cutoffRow.id;
+  let deletedPosts = 0;
+  let deletedTopics = 0;
+  let deletedRuns = 0;
+  db.transaction(() => {
+    deletedPosts = db
+      .prepare(
+        `DELETE FROM topic_posts WHERE topic_id IN (
+           SELECT id FROM topics WHERE run_id <= ?
+         )`,
+      )
+      .run(cutoffId).changes;
+    deletedTopics = db
+      .prepare(`DELETE FROM topics WHERE run_id <= ?`)
+      .run(cutoffId).changes;
+    deletedRuns = db
+      .prepare(`DELETE FROM runs WHERE id <= ?`)
+      .run(cutoffId).changes;
+  })();
+  if (deletedRuns > 0) {
+    console.log(
+      `[queries] Retention: pruned ${deletedRuns} runs, ${deletedTopics} topics, ${deletedPosts} posts (kept last ${keepN})`,
+    );
+  }
+  return { deletedRuns, deletedTopics, deletedPosts };
 }
 
 export function getLastRun(): RunRow | null {
   const db = getDb();
-  return (db.prepare(`SELECT * FROM runs ORDER BY id DESC LIMIT 1`).get() as RunRow) ?? null;
+  return (
+    (db
+      .prepare(`SELECT * FROM runs ORDER BY id DESC LIMIT 1`)
+      .get() as RunRow) ?? null
+  );
 }
 
 export function getPreviousRun(currentRunId: number): RunRow | null {
@@ -115,9 +184,10 @@ export function insertTopicsForRun(runId: number, topics: Topic[]): void {
           author: post.author,
           subreddit: post.subreddit,
           url: post.url,
-          created_at: post.createdUtc > 0
-            ? new Date(post.createdUtc * 1000).toISOString()
-            : new Date().toISOString(),
+          created_at:
+            post.createdUtc > 0
+              ? new Date(post.createdUtc * 1000).toISOString()
+              : new Date().toISOString(),
         });
       }
     }
@@ -144,11 +214,13 @@ export function clearRunData(runId: number): void {
   const db = getDb();
   db.transaction(() => {
     // Delete posts first (FK references topic_id)
-    db.prepare(`
+    db.prepare(
+      `
       DELETE FROM topic_posts WHERE topic_id IN (
         SELECT id FROM topics WHERE run_id = ?
       )
-    `).run(runId);
+    `,
+    ).run(runId);
     db.prepare(`DELETE FROM topics WHERE run_id = ?`).run(runId);
     db.prepare(`DELETE FROM runs WHERE id = ?`).run(runId);
   })();
@@ -159,17 +231,23 @@ export function clearRunData(runId: number): void {
  * the autoincrement counters. Use before a clean-slate run or on
  * explicit /reset requests.
  */
-export function clearAllData(): { deletedRuns: number; deletedTopics: number; deletedPosts: number } {
+export function clearAllData(): {
+  deletedRuns: number;
+  deletedTopics: number;
+  deletedPosts: number;
+} {
   const db = getDb();
   let deletedPosts = 0;
   let deletedTopics = 0;
   let deletedRuns = 0;
   db.transaction(() => {
-    deletedPosts = (db.prepare(`DELETE FROM topic_posts`).run()).changes;
-    deletedTopics = (db.prepare(`DELETE FROM topics`).run()).changes;
-    deletedRuns = (db.prepare(`DELETE FROM runs`).run()).changes;
+    deletedPosts = db.prepare(`DELETE FROM topic_posts`).run().changes;
+    deletedTopics = db.prepare(`DELETE FROM topics`).run().changes;
+    deletedRuns = db.prepare(`DELETE FROM runs`).run().changes;
     // Reset autoincrement sequences
-    db.prepare(`DELETE FROM sqlite_sequence WHERE name IN ('runs','topics','topic_posts')`).run();
+    db.prepare(
+      `DELETE FROM sqlite_sequence WHERE name IN ('runs','topics','topic_posts')`,
+    ).run();
   })();
   return { deletedRuns, deletedTopics, deletedPosts };
 }
@@ -182,7 +260,7 @@ export function getCreditSummary(): CreditSummary {
   const rows = db
     .prepare(
       `SELECT id, started_at, credits_used, queries_count, raw_post_count
-       FROM runs ORDER BY id DESC`
+       FROM runs ORDER BY id DESC`,
     )
     .all() as Array<{
     id: number;

@@ -11,11 +11,18 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 const PIPELINE_BASE = "http://localhost:8086";
+const API_TOKEN = process.env.XPOZ_API_TOKEN ?? "";
 
 // ── HTTP helper ────────────────────────────────────────────────────────────────
 
+function authHeaders(): Record<string, string> {
+  return API_TOKEN ? { "X-Xpoz-Token": API_TOKEN } : {};
+}
+
 async function apiGet(path: string): Promise<unknown> {
-  const res = await fetch(`${PIPELINE_BASE}${path}`);
+  const res = await fetch(`${PIPELINE_BASE}${path}`, {
+    headers: authHeaders(),
+  });
   if (!res.ok) {
     throw new Error(`Pipeline API error ${res.status}: ${await res.text()}`);
   }
@@ -25,7 +32,7 @@ async function apiGet(path: string): Promise<unknown> {
 async function apiPost(path: string, body?: unknown): Promise<unknown> {
   const res = await fetch(`${PIPELINE_BASE}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
@@ -35,7 +42,9 @@ async function apiPost(path: string, body?: unknown): Promise<unknown> {
 }
 
 async function apiGetText(path: string): Promise<string> {
-  const res = await fetch(`${PIPELINE_BASE}${path}`);
+  const res = await fetch(`${PIPELINE_BASE}${path}`, {
+    headers: authHeaders(),
+  });
   if (!res.ok) {
     throw new Error(`Pipeline API error ${res.status}: ${await res.text()}`);
   }
@@ -111,9 +120,10 @@ server.tool(
   "Trigger a new Reddit Intelligence Pipeline run asynchronously. " +
     "The run ingests posts from the specified subreddits via Xpoz, normalizes, " +
     "clusters into topics based on the provided keywords, compares with previous run, and saves to SQLite. " +
-    "Returns immediately with run metadata — poll GET /health or use xpoz_get_topics after ~2 min. " +
+    "Returns immediately with {jobId, status:'started', ...} — the pipeline runs async (~2 min) and delivers a Telegram digest to the operator on completion by default. " +
+    "Do NOT poll after calling this tool — the operator receives the digest directly via Telegram; acknowledge the trigger and stop. " +
     "Requires a topic seed: label + subreddits + keywords (no defaults). " +
-    "Pass notify=true to send a Telegram digest to the operator on completion. " +
+    "Pass notify=false only for silent/background runs (no Telegram delivery). In that case, poll xpoz_get_job_status with the returned jobId to check progress. " +
     "Use when the user explicitly asks to run a new analysis with a specific seed/theme.",
   {
     label: z
@@ -142,11 +152,12 @@ server.tool(
       .boolean()
       .optional()
       .describe(
-        "If true, send a Telegram digest to the operator chat on completion. Default: false",
+        "If true (default when invoked via MCP), send a Telegram digest to the operator chat on completion. Pass false only for silent/background runs.",
       ),
   },
   async (input) => {
-    const data = await apiPost("/run", input);
+    const payload = { ...input, notify: input.notify ?? true };
+    const data = await apiPost("/run", payload);
     return {
       content: [
         {
@@ -169,6 +180,39 @@ server.tool(
   {},
   async () => {
     const data = await apiGet("/runs");
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(data, null, 2),
+        },
+      ],
+    };
+  },
+);
+
+// ── Tool: xpoz_get_job_status ──────────────────────────────────────────────────
+
+server.tool(
+  "xpoz_get_job_status",
+  "Check the status of a specific xpoz_trigger_run job by its jobId. " +
+    "Returns one of: status='running' (still ingesting), 'completed' (result attached), 'failed' (error attached). " +
+    "Use this ONLY when the caller opted out of notify:true and needs to poll for completion. " +
+    "For normal conversational use, prefer notify:true on xpoz_trigger_run — the digest is delivered " +
+    "directly to Telegram and no polling is needed.",
+  {
+    // Zod v3's z.string().uuid() is deprecated in v4. Use a regex instead so
+    // this keeps compiling across zod minor bumps; matches RFC 4122 shape.
+    jobId: z
+      .string()
+      .regex(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+        "jobId must be an RFC 4122 UUID",
+      )
+      .describe("The jobId returned by xpoz_trigger_run (RFC 4122 UUID)"),
+  },
+  async ({ jobId }) => {
+    const data = await apiGet(`/run/jobs/${jobId}`);
     return {
       content: [
         {

@@ -15,7 +15,9 @@
     "history": "tsx --env-file=.env src/index.ts --history",
     "mcp": "tsx --env-file=.env mcp-server.ts",
     "build": "tsc",
-    "build:mcp": "tsc && echo 'MCP server compiled to dist/mcp-server.js'"
+    "build:mcp": "tsc && echo 'MCP server compiled to dist/mcp-server.js'",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@hono/node-server": "^2.0.0",
@@ -29,6 +31,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.5"
   }
 }

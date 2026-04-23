@@ -14,7 +14,6 @@ import {
   insertTopicsForRun,
   getPreviousRun,
   getTopicsForRun,
-  clearAllData,
 } from "./store/queries.js";
 import { closeDb } from "./store/db.js";
 import { calcCredits } from "./store/schema.js";
@@ -29,8 +28,8 @@ import type { TopicConfig } from "../config.js";
 export interface PipelineOptions {
   outputMode: "console" | "json" | "md" | "both";
   notify: boolean;
-  force: boolean;      // force Telegram even if no new/up topics
-  closeDb?: boolean;   // close DB connection after run (default: true)
+  force: boolean; // force Telegram even if no new/up topics
+  closeDb?: boolean; // close DB connection after run (default: true)
   topicConfig: TopicConfig; // required — no presets, no defaults
 }
 
@@ -61,7 +60,9 @@ function deltaIcons(d: ReturnType<typeof computeDelta>): string {
 
 // ─── Pipeline runner ──────────────────────────────────────────────────────────
 
-export async function runPipeline(opts: PipelineOptions): Promise<PipelineResult> {
+export async function runPipeline(
+  opts: PipelineOptions,
+): Promise<PipelineResult> {
   const { outputMode, notify, force, topicConfig } = opts;
   const shouldCloseDb = opts.closeDb ?? true;
 
@@ -72,30 +73,25 @@ export async function runPipeline(opts: PipelineOptions): Promise<PipelineResult
 
   const startedAt = new Date().toISOString();
 
-  // ── 0. Clean slate — wipe previous data before every run ──────────────────
-  console.log("\n[0/5] Clearing previous run data...");
-  const cleared = clearAllData();
-  console.log(
-    `      ✓ Cleared: ${cleared.deletedRuns} runs, ${cleared.deletedTopics} topics, ${cleared.deletedPosts} posts`
-  );
-
   // ── 1. Ingest ──────────────────────────────────────────────────────────────
-  console.log("\n[1/5] Ingesting from Xpoz...");
+  console.log("\n[1/4] Ingesting from Xpoz...");
   const ingestSummary: IngestSummary = await ingestAll(topicConfig);
   console.log(
     `      ✓ ${ingestSummary.totalFetched} posts fetched in ${ingestSummary.durationMs}ms` +
-    (ingestSummary.totalErrors > 0 ? ` (${ingestSummary.totalErrors} errors)` : "")
+      (ingestSummary.totalErrors > 0
+        ? ` (${ingestSummary.totalErrors} errors)`
+        : ""),
   );
 
   // ── 2. Normalize ───────────────────────────────────────────────────────────
-  console.log("\n[2/5] Normalizing + clustering...");
+  console.log("\n[2/4] Normalizing + clustering...");
   const normalized = normalize(ingestSummary.results, topicConfig);
   console.log(
-    `      ✓ ${normalized.stats.rawPostCount} raw → ${normalized.stats.afterDedup} unique → ${normalized.stats.topicCount} topics`
+    `      ✓ ${normalized.stats.rawPostCount} raw → ${normalized.stats.afterDedup} unique → ${normalized.stats.topicCount} topics`,
   );
 
   // ── 3. Persist ─────────────────────────────────────────────────────────────
-  console.log("\n[3/5] Persisting to SQLite...");
+  console.log("\n[3/4] Persisting to SQLite...");
   const queriesCount = ingestSummary.results.length;
   const creditsUsed = calcCredits(queriesCount, ingestSummary.totalFetched);
 
@@ -117,11 +113,11 @@ export async function runPipeline(opts: PipelineOptions): Promise<PipelineResult
   console.log(
     previousRun
       ? `      ✓ Run #${runId} saved. Comparing with Run #${previousRun.id}. Credits used: ${creditsUsed.toFixed(2)}`
-      : `      ✓ Run #${runId} saved. (first run — no delta available). Credits used: ${creditsUsed.toFixed(2)}`
+      : `      ✓ Run #${runId} saved. (first run — no delta available). Credits used: ${creditsUsed.toFixed(2)}`,
   );
 
   // ── 4. Delta + Report ──────────────────────────────────────────────────────
-  console.log("\n[4/5] Computing delta + rendering report...");
+  console.log("\n[4/4] Computing delta + rendering report...");
   const delta = computeDelta(normalized.topics, previousTopics);
 
   const reportInput = {
@@ -156,11 +152,11 @@ export async function runPipeline(opts: PipelineOptions): Promise<PipelineResult
     console.log("\n" + md);
   }
 
-  // ── 5. Notify ──────────────────────────────────────────────────────────────
+  // ── 5. Notify (optional) ───────────────────────────────────────────────────
   let telegramSent = false;
 
   if (notify) {
-    console.log("\n[5/5] Sending Telegram digest...");
+    console.log("\n[notify] Sending Telegram digest...");
     telegramSent = await sendTelegramDigest({
       topics: delta.topics,
       runId,
@@ -171,15 +167,19 @@ export async function runPipeline(opts: PipelineOptions): Promise<PipelineResult
       force,
     });
   } else {
-    console.log("\n[5/5] Notify disabled — skipping Telegram");
+    console.log("\n[notify] Disabled — skipping Telegram");
   }
 
   // ── Summary ────────────────────────────────────────────────────────────────
   console.log("\n═══════════════════════════════════════════════════");
   if (previousRun) {
-    console.log(`  ✅ Run #${runId} complete — ${deltaIcons(delta)} vs Run #${previousRun.id}`);
+    console.log(
+      `  ✅ Run #${runId} complete — ${deltaIcons(delta)} vs Run #${previousRun.id}`,
+    );
   } else {
-    console.log(`  ✅ Run #${runId} complete — ${normalized.topics.length} topics (baseline)`);
+    console.log(
+      `  ✅ Run #${runId} complete — ${normalized.topics.length} topics (baseline)`,
+    );
   }
   if (telegramSent) {
     console.log("  📱 Telegram digest sent");
