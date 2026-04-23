@@ -142,14 +142,15 @@ app.post("/run", async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const notify = body.notify === true;
   const force = body.force === true;
+  const topic = typeof body.topic === "string" ? body.topic : undefined;
 
   runInProgress = true;
 
   // Fire-and-forget — returns immediately, run happens async
   (async () => {
     try {
-      console.log("[API] On-demand run triggered via POST /run");
-      await runPipeline({ notify, force, outputMode: "both", closeDb: false });
+      console.log(`[API] On-demand run triggered via POST /run${topic ? ` (topic: ${topic})` : ""}`);
+      await runPipeline({ notify, force, outputMode: "both", closeDb: false, topic });
       console.log("[API] On-demand run completed");
     } catch (err) {
       console.error("[API] On-demand run failed:", err);
@@ -160,6 +161,7 @@ app.post("/run", async (c) => {
 
   return c.json({
     status: "started",
+    topic: topic ?? "longevity",
     message: "Pipeline run started. Poll GET /health or GET /topics/latest for results.",
     estimatedDurationSec: 90,
   });

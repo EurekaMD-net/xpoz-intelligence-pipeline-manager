@@ -16,6 +16,9 @@
  *   npx tsx src/index.ts --serve                 # start HTTP API on port 8086
  *   npx tsx src/index.ts --serve --daemon --notify # API + cron + notifications
  *   npx tsx src/index.ts --history               # list past runs
+ *   npx tsx src/index.ts --topic aiagents        # run with AI agents topic
+ *   npx tsx src/index.ts --topic crypto          # run with crypto topic
+ *   npx tsx src/index.ts --topics                # list available topics
  */
 
 import { getAllRuns } from "./store/queries.js";
@@ -23,6 +26,7 @@ import { closeDb } from "./store/db.js";
 import { runPipeline } from "./pipeline.js";
 import { startDaemon } from "./scheduler/cron.js";
 import { startApiServer } from "./api/server.js";
+import { VALID_TOPICS, TOPIC_PRESETS } from "../config.js";
 
 // ─── CLI args ─────────────────────────────────────────────────────────────────
 
@@ -33,6 +37,7 @@ const outputArg = args.includes("--output")
   : "console";
 
 const showHistory = args.includes("--history");
+const showTopics = args.includes("--topics");
 const daemonMode = args.includes("--daemon");
 const notifyMode = args.includes("--notify");
 const forceMode = args.includes("--force");
@@ -43,6 +48,9 @@ const serveMode = args.includes("--serve");
 const portArg = args.includes("--port")
   ? parseInt(args[args.indexOf("--port") + 1], 10)
   : 8086;
+const topicArg = args.includes("--topic")
+  ? args[args.indexOf("--topic") + 1]
+  : undefined;
 
 // ─── History mode ─────────────────────────────────────────────────────────────
 
@@ -78,7 +86,24 @@ function printHistory(): void {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
+function printTopics(): void {
+  console.log("\n═══ Available Topics ═══════════════════════════════");
+  for (const slug of VALID_TOPICS) {
+    const cfg = TOPIC_PRESETS[slug];
+    console.log(`  ${slug.padEnd(12)} — ${cfg.label}`);
+    console.log(`               Subreddits: ${cfg.subreddits.join(", ")}`);
+  }
+  console.log("═══════════════════════════════════════════════════\n");
+  console.log("Usage: npx tsx src/index.ts --topic <slug>");
+  console.log("       npx tsx src/index.ts --topic aiagents --output md\n");
+}
+
 async function main(): Promise<void> {
+  if (showTopics) {
+    printTopics();
+    return;
+  }
+
   if (showHistory) {
     printHistory();
     closeDb();
@@ -111,6 +136,7 @@ async function main(): Promise<void> {
     notify: notifyMode,
     force: forceMode,
     closeDb: true,
+    topic: topicArg,
   });
 }
 

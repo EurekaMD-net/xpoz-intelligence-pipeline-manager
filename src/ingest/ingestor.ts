@@ -5,7 +5,7 @@
  * Returns a flat array of normalized posts with source metadata.
  */
 
-import { ALL_SUBREDDITS, KEYWORD_SUBREDDIT_ALLOWLIST, SEARCH_KEYWORDS, XPOZ_CONFIG } from "../../config.js";
+import { getTopicConfig, XPOZ_CONFIG, type TopicConfig } from "../../config.js";
 import { getSubredditPosts, searchByKeyword, type NormalizedXpozPost } from "./xpoz-client.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -63,16 +63,23 @@ async function runInBatches<T>(
 
 // ─── Main Ingestor ────────────────────────────────────────────────────────────
 
-export async function ingestAll(): Promise<IngestSummary> {
+export async function ingestAll(topicOverride?: string | TopicConfig): Promise<IngestSummary> {
+  const topicCfg: TopicConfig =
+    typeof topicOverride === "object" && topicOverride !== null
+      ? topicOverride
+      : getTopicConfig(typeof topicOverride === "string" ? topicOverride : undefined);
+
+  const { subreddits, keywords, allowlist, label } = topicCfg;
+
   const startedAt = Date.now();
-  console.log(`[ingestor] Starting — ${ALL_SUBREDDITS.length} subreddits + ${SEARCH_KEYWORDS.length} keywords`);
+  console.log(`[ingestor] Starting — topic: "${label}" — ${subreddits.length} subreddits + ${keywords.length} keywords`);
   console.log(`[ingestor] Score filter: ≥ ${XPOZ_CONFIG.minScore}`);
 
-  const subredditTasks = ALL_SUBREDDITS.map((sub) => () =>
+  const subredditTasks = subreddits.map((sub) => () =>
     safeFetch(`subreddit:${sub}`, () => getSubredditPosts(sub))
   );
 
-  const keywordTasks = SEARCH_KEYWORDS.map((kw) => () =>
+  const keywordTasks = keywords.map((kw) => () =>
     safeFetch(`keyword:${kw}`, () => searchByKeyword(kw))
   );
 
@@ -105,7 +112,7 @@ export async function ingestAll(): Promise<IngestSummary> {
     } else {
       // Filter keyword results to relevant subreddits only (keyword search returns all of Reddit)
       const allPosts = raw.data ?? [];
-      const posts = allPosts.filter((p) => KEYWORD_SUBREDDIT_ALLOWLIST.has(p.subreddit));
+      const posts = allPosts.filter((p) => allowlist.has(p.subreddit));
       const filtered = allPosts.length - posts.length;
       console.log(`[ingestor] ✅ keyword:"${kw}": ${posts.length} posts (${filtered} filtered — off-topic subreddits)`);
       results.push({ subreddit: "search", source: "keyword", keyword: kw, posts, fetchedAt: Date.now() });
