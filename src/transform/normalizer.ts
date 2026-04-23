@@ -127,6 +127,19 @@ function buildClusters(topicConfig: TopicConfig): DynamicCluster[] {
     });
   }
 
+  // Twitter keywords — each becomes its own cluster (source key: twitter:<kw>)
+  for (const kw of (topicConfig.twitterKeywords ?? [])) {
+    const normalized = kw.toLowerCase().trim();
+    clusters.push({
+      title: kw
+        .split(" ")
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(" "),
+      matchTerms: [normalized],
+      sourceKey: `twitter:${normalized}`,
+    });
+  }
+
   return clusters;
 }
 

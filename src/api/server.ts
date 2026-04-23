@@ -163,9 +163,9 @@ app.post("/run", async (c) => {
   const subreddits: string[] = Array.isArray(body.subreddits) ? body.subreddits : [];
   const keywords: string[]   = Array.isArray(body.keywords)   ? body.keywords   : [];
 
-  if (subreddits.length === 0 && keywords.length === 0) {
+  if (subreddits.length === 0 && keywords.length === 0 && (!Array.isArray(body.twitterKeywords) || body.twitterKeywords.length === 0)) {
     return c.json(
-      { error: "Run requires at least 'subreddits' or 'keywords' in the request body. No presets exist." },
+      { error: "Run requires at least one of: 'subreddits', 'keywords', or 'twitterKeywords'." },
       400
     );
   }
