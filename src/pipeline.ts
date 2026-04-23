@@ -81,7 +81,7 @@ export async function runPipeline(opts: PipelineOptions): Promise<PipelineResult
 
   // ── 2. Normalize ───────────────────────────────────────────────────────────
   console.log("\n[2/5] Normalizing + clustering...");
-  const normalized = normalize(ingestSummary.results);
+  const normalized = normalize(ingestSummary.results, topicConfig);
   console.log(
     `      ✓ ${normalized.stats.rawPostCount} raw → ${normalized.stats.afterDedup} unique → ${normalized.stats.topicCount} topics`
   );

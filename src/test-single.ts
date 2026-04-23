@@ -3,7 +3,7 @@
  */
 import { getSubredditPosts } from "./ingest/xpoz-client.js";
 
-const posts = await getSubredditPosts("immortalists");
+const posts = await getSubredditPosts("Bitcoin"); // replace with any subreddit to test the parser
 console.log("Posts received:", posts.length);
 if (posts.length > 0) {
   console.log("\nSample post:");

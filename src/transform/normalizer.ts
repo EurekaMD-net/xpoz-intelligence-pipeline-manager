@@ -1,15 +1,20 @@
 /**
  * Normalizer — Deduplication, cleaning, and topic clustering
  *
+ * Clustering is fully dynamic — no hardcoded topic keywords.
+ * Topics are derived from the keywords and subreddits supplied
+ * by the operator in each run request.
+ *
  * Phase 1 scope:
  * - Deduplicate posts by ID across all sources
  * - Sort by score descending
- * - Cluster into topics via keyword matching
+ * - Cluster into topics via keyword matching against run config
  * - Return top 10 topics with aggregate scores
  */
 
 import type { NormalizedXpozPost } from "../ingest/xpoz-client.js";
 import type { IngestResult } from "../ingest/ingestor.js";
+import type { TopicConfig } from "../../config.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -37,6 +42,18 @@ export interface NormalizeResult {
     afterDedup: number;
     topicCount: number;
   };
+}
+
+/**
+ * Dynamic cluster definition built from the run's topicConfig.
+ * Each keyword from the request becomes its own cluster label.
+ * Posts are matched against their fetch source first (keyword:X),
+ * then by text scan as fallback.
+ */
+interface DynamicCluster {
+  title: string;       // display name (capitalized keyword)
+  matchTerms: string[]; // lowercase terms to match in post text
+  sourceKey: string;   // fetch source key, e.g. "keyword:bitcoin price"
 }
 
 // ─── Deduplication ────────────────────────────────────────────────────────────
@@ -74,98 +91,85 @@ function deduplicatePosts(results: IngestResult[]): DeduplicatedPost[] {
   return Array.from(seen.values()).sort((a, b) => b.score - a.score);
 }
 
-// ─── Topic Clusters ───────────────────────────────────────────────────────────
+// ─── Dynamic Cluster Builder ──────────────────────────────────────────────────
 
-const TOPIC_CLUSTERS: Array<{ title: string; keywords: string[] }> = [
-  {
-    title: "Epigenetic Reprogramming & Cell Rejuvenation",
-    keywords: ["epigenetic", "reprogramming", "yamanaka", "life biosciences", "altos labs", "turn bio", "er-100", "partial reprogramming", "cellular reset"],
-  },
-  {
-    title: "Rapamycin & mTOR",
-    keywords: ["rapamycin", "mtor", "sirolimus", "rapalog", "rapa-ex"],
-  },
-  {
-    title: "Senolytics & Senescent Cells",
-    keywords: ["senolytic", "senescent", "senescence", "dasatinib", "quercetin", "sglt2", "zombie cell", "homoharringtonine", "fisetin"],
-  },
-  {
-    title: "Mitochondrial Health & NAD+",
-    keywords: ["mitochondr", "nad+", "nmn", "coq10", "mitrix", "atp", "berberine", "metformin", "ampk", "nicotinamide"],
-  },
-  {
-    title: "GLP-1 / Ozempic & Metabolic Longevity",
-    keywords: ["glp-1", "glp1", "ozempic", "semaglutide", "tirzepatide", "metabolic", "insulin resistance", "obesity", "diabetes longevity"],
-  },
-  {
-    title: "Cryonics & Brain Preservation",
-    keywords: ["cryo", "cryopreserv", "frozen brain", "vitrif", "alcor", "brain preservation", "cryosleep"],
-  },
-  {
-    title: "Mind Upload & Digital Consciousness",
-    keywords: ["mind upload", "brain upload", "consciousness", "digital immortal", "whole brain emulation", "substrate independent", "digital body", "brain emulation"],
-  },
-  {
-    title: "Telomere & Telomerase Therapies",
-    keywords: ["telomer", "telomerase", "telocyte", "sirt6", "tert", "telomere shortening", "epitalon"],
-  },
-  {
-    title: "AI & Drug Discovery for Longevity",
-    // Requires AI keyword combined with longevity/drug-discovery context — not general AI posts
-    keywords: ["alphafold", "drug discovery ai", "openai aging", "ai longevity", "machine learning longevity", "ai drug", "ai aging", "ai lifespan", "ai cancer", "ai reprogramming", "ai biology", "ai health", "ai medicine", "aging algorithm", "longevity ai"],
-  },
-  {
-    title: "Philosophy of Immortality & Vitalism",
-    keywords: ["immortal", "don't die", "vitalism", "anti-death", "longevity escape velocity", "lev", "bryan johnson", "anti-aging movement", "defeat aging", "cure aging", "end aging"],
-  },
-  {
-    title: "Gene Therapy & CRISPR",
-    keywords: ["gene therapy", "crispr", "aav", "gene editing", "dna repair", "dna damage", "genetic"],
-  },
-  {
-    title: "Stem Cells & Regenerative Medicine",
-    keywords: ["stem cell", "regenerat", "mesenchymal", "ips cell", "thymus", "young blood", "plasma"],
-  },
-  {
-    title: "Nutrition, Supplements & Lifestyle",
-    keywords: ["supplement", "diet", "fasting", "exercise", "lifespan", "food", "cancer prevent", "vegeta", "fruit", "seed", "berr", "nuts", "fish", "omega", "vitamin", "mineral", "cocoa", "cruciferous", "cardiovascular"],
-  },
-  {
-    title: "Cancer Research & Prevention",
-    keywords: ["cancer", "tumor", "carcinogen", "oncol", "chemotherapy", "immunotherapy", "colorectal", "breast cancer", "pancreatic"],
-  },
-  {
-    title: "Neuroscience & Brain Health",
-    keywords: ["alzheimer", "dementia", "cognitive", "brain health", "neurodegenerat", "blood-brain barrier", "neural", "neuron", "brain fog", "memory"],
-  },
-  {
-    title: "Biohacking & Personal Optimization",
-    keywords: ["biohack", "testosterone", "hormone", "peptide", "bpc-157", "protocol", "stack", "hgh", "igf", "sarm", "nootropic"],
-  },
-];
+/**
+ * Build clusters from the run's topicConfig — no hardcoded keywords.
+ *
+ * Strategy (priority order):
+ * 1. One cluster per keyword from topicConfig.keywords
+ * 2. One cluster per subreddit from topicConfig.subreddits (for posts that
+ *    didn't match any keyword)
+ * 3. "Other / Emerging" for posts that match nothing
+ *
+ * Cluster title = the keyword / subreddit name (title-cased).
+ */
+function buildClusters(topicConfig: TopicConfig): DynamicCluster[] {
+  const clusters: DynamicCluster[] = [];
 
-function matchCluster(post: DeduplicatedPost): string {
-  const text = `${post.title} ${post.selftext}`.toLowerCase();
-  for (const cluster of TOPIC_CLUSTERS) {
-    if (cluster.keywords.some((kw) => text.includes(kw.toLowerCase()))) {
+  for (const kw of topicConfig.keywords) {
+    const normalized = kw.toLowerCase().trim();
+    clusters.push({
+      title: kw
+        .split(" ")
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(" "),
+      matchTerms: [normalized],
+      sourceKey: `keyword:${normalized}`,
+    });
+  }
+
+  for (const sr of topicConfig.subreddits) {
+    clusters.push({
+      title: `r/${sr}`,
+      matchTerms: [sr.toLowerCase()],
+      sourceKey: `subreddit:${sr}`,
+    });
+  }
+
+  return clusters;
+}
+
+/**
+ * Assign a post to its best cluster.
+ *
+ * Priority:
+ * 1. Exact fetch-source match (post came from that keyword/subreddit query)
+ * 2. Text match in title + selftext
+ * 3. "Other / Emerging"
+ */
+function matchCluster(post: DeduplicatedPost, clusters: DynamicCluster[]): string {
+  // 1. Source match — most reliable
+  for (const cluster of clusters) {
+    if (post.fetchSources.some((s) => s === cluster.sourceKey)) {
       return cluster.title;
     }
   }
+
+  // 2. Text match fallback
+  const text = `${post.title} ${post.selftext ?? ""}`.toLowerCase();
+  for (const cluster of clusters) {
+    if (cluster.matchTerms.some((term) => text.includes(term))) {
+      return cluster.title;
+    }
+  }
+
   return "Other / Emerging";
 }
 
-function groupIntoTopics(posts: DeduplicatedPost[]): Topic[] {
-  const clusters = new Map<string, DeduplicatedPost[]>();
+function groupIntoTopics(posts: DeduplicatedPost[], topicConfig: TopicConfig): Topic[] {
+  const clusters = buildClusters(topicConfig);
+  const buckets = new Map<string, DeduplicatedPost[]>();
 
   for (const post of posts) {
-    const label = matchCluster(post);
-    if (!clusters.has(label)) clusters.set(label, []);
-    clusters.get(label)!.push(post);
+    const label = matchCluster(post, clusters);
+    if (!buckets.has(label)) buckets.set(label, []);
+    buckets.get(label)!.push(post);
   }
 
   const topics: Topic[] = [];
 
-  for (const [title, clusterPosts] of clusters.entries()) {
+  for (const [title, clusterPosts] of buckets.entries()) {
     if (clusterPosts.length === 0) continue;
     const sorted = [...clusterPosts].sort((a, b) => b.score - a.score);
     topics.push({
@@ -186,10 +190,10 @@ function groupIntoTopics(posts: DeduplicatedPost[]): Topic[] {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
-export function normalize(results: IngestResult[]): NormalizeResult {
+export function normalize(results: IngestResult[], topicConfig: TopicConfig): NormalizeResult {
   const rawPostCount = results.reduce((s, r) => s + r.posts.length, 0);
   const posts = deduplicatePosts(results);
-  const topics = groupIntoTopics(posts);
+  const topics = groupIntoTopics(posts, topicConfig);
 
   console.log(`[normalizer] ${rawPostCount} raw → ${posts.length} unique → ${topics.length} clusters`);
 

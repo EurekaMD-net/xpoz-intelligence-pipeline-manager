@@ -53,10 +53,10 @@ const server = new McpServer({
 
 server.tool(
   "xpoz_get_topics",
-  "Get the top longevity/biohacking topics from the latest Reddit Intelligence Pipeline run. " +
+  "Get the top topics from the latest Reddit Intelligence Pipeline run. " +
     "Returns ranked topics with scores, delta (new/up/down/stable), and post counts. " +
-    "Use this when the user asks about longevity trends, Reddit intel, biohacking topics, " +
-    "what's trending in r/longevity, or wants the intelligence digest.",
+    "Use this when the user asks about trending topics, Reddit intel, " +
+    "what's hot in a subreddit, or wants the intelligence digest.",
   {
     limit: z
       .number()
@@ -89,7 +89,7 @@ server.tool(
   "Get the full Markdown intelligence digest from the latest Reddit pipeline run. " +
     "Includes ranked topic list, score deltas, subreddit sources, and run metadata. " +
     "Use this when the user wants the complete formatted report, morning briefing intel, " +
-    "or a shareable summary of longevity trends from Reddit.",
+    "or a shareable summary of what's trending on Reddit.",
   {},
   async () => {
     const text = await apiGetText("/digest/latest");
@@ -109,8 +109,8 @@ server.tool(
 server.tool(
   "xpoz_trigger_run",
   "Trigger a new Reddit Intelligence Pipeline run asynchronously. " +
-    "The run ingests posts from longevity/biohacking subreddits via Xpoz, normalizes, " +
-    "clusters into topics, compares with previous run, and saves to SQLite. " +
+    "The run ingests posts from the configured subreddits via Xpoz, normalizes, " +
+    "clusters into topics based on the run's keywords, compares with previous run, and saves to SQLite. " +
     "Returns immediately with a runId — use xpoz_get_topics after ~2 minutes to see results. " +
     "Use this when the user explicitly asks to refresh the intel, run a new analysis, " +
     "or when the last run is older than 24 hours and fresh data is needed. " +
