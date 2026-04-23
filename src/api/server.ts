@@ -17,7 +17,7 @@ import { serve } from "@hono/node-server";
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { getDb } from "../store/db.js";
-import { getAllRuns, getLastRun, getTopicsForRun } from "../store/queries.js";
+import { getAllRuns, getLastRun, getTopicsForRun, getCreditSummary } from "../store/queries.js";
 import { runPipeline } from "../pipeline.js";
 // CONFIG available if needed for future env-based port config
 
@@ -29,6 +29,7 @@ const app = new Hono();
 
 app.get("/health", (c) => {
   const lastRun = getLastRun();
+  const credits = getCreditSummary();
   return c.json({
     status: "ok",
     service: "xpoz-intelligence-pipeline",
@@ -40,10 +41,24 @@ app.get("/health", (c) => {
           durationMs: lastRun.duration_ms,
           uniquePostCount: lastRun.unique_post_count,
           topicCount: lastRun.topic_count,
+          creditsUsed: lastRun.credits_used,
         }
       : null,
+    credits: {
+      used: credits.totalCreditsUsed,
+      remaining: credits.totalCreditsRemaining,
+      total: credits.planCreditsTotal,
+      percentUsed: credits.percentUsed,
+    },
     uptime: Math.floor(process.uptime()),
   });
+});
+
+// ─── Credits ──────────────────────────────────────────────────────────────────
+
+app.get("/credits", (c) => {
+  const summary = getCreditSummary();
+  return c.json(summary);
 });
 
 // ─── Runs ─────────────────────────────────────────────────────────────────────

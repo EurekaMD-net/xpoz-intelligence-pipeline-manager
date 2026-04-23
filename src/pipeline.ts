@@ -16,6 +16,7 @@ import {
   getTopicsForRun,
 } from "./store/queries.js";
 import { closeDb } from "./store/db.js";
+import { calcCredits } from "./store/schema.js";
 import { computeDelta } from "./analyze/delta.js";
 import { renderMarkdown, renderJson } from "./report/formatter.js";
 import { sendTelegramDigest } from "./notify/telegram.js";
@@ -40,6 +41,8 @@ export interface PipelineResult {
   newTopics: number;
   upTopics: number;
   telegramSent: boolean;
+  creditsUsed: number;
+  queriesCount: number;
 }
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
@@ -84,12 +87,17 @@ export async function runPipeline(opts: PipelineOptions): Promise<PipelineResult
 
   // ── 3. Persist ─────────────────────────────────────────────────────────────
   console.log("\n[3/5] Persisting to SQLite...");
+  const queriesCount = ingestSummary.results.length;
+  const creditsUsed = calcCredits(queriesCount, ingestSummary.totalFetched);
+
   const runId = insertRun({
     started_at: startedAt,
     duration_ms: ingestSummary.durationMs,
     raw_post_count: normalized.stats.rawPostCount,
     unique_post_count: normalized.stats.afterDedup,
     topic_count: normalized.topics.length,
+    credits_used: creditsUsed,
+    queries_count: queriesCount,
   });
 
   insertTopicsForRun(runId, normalized.topics);
@@ -99,8 +107,8 @@ export async function runPipeline(opts: PipelineOptions): Promise<PipelineResult
 
   console.log(
     previousRun
-      ? `      ✓ Run #${runId} saved. Comparing with Run #${previousRun.id}`
-      : `      ✓ Run #${runId} saved. (first run — no delta available)`
+      ? `      ✓ Run #${runId} saved. Comparing with Run #${previousRun.id}. Credits used: ${creditsUsed.toFixed(2)}`
+      : `      ✓ Run #${runId} saved. (first run — no delta available). Credits used: ${creditsUsed.toFixed(2)}`
   );
 
   // ── 4. Delta + Report ──────────────────────────────────────────────────────
@@ -185,5 +193,7 @@ export async function runPipeline(opts: PipelineOptions): Promise<PipelineResult
     newTopics: delta.newCount,
     upTopics: delta.upCount,
     telegramSent,
+    creditsUsed,
+    queriesCount,
   };
 }

@@ -7,6 +7,20 @@
  *   topic_posts — posts that belong to each topic (denormalized for query speed)
  */
 
+/**
+ * Total credits on the Free plan (one-time, non-renewing).
+ * Switch to 30_000 when upgrading to Pro ($20/mo).
+ */
+export const PLAN_CREDITS_TOTAL = 5_000;
+
+/**
+ * Credit cost formula (Xpoz Free/Pro):
+ *   credits = (queriesCount × 5) + (postsReturnedRaw × 0.005)
+ */
+export function calcCredits(queriesCount: number, postsReturnedRaw: number): number {
+  return queriesCount * 5 + postsReturnedRaw * 0.005;
+}
+
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS runs (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -14,7 +28,9 @@ CREATE TABLE IF NOT EXISTS runs (
   duration_ms     INTEGER NOT NULL,
   raw_post_count  INTEGER NOT NULL,
   unique_post_count INTEGER NOT NULL,
-  topic_count     INTEGER NOT NULL
+  topic_count     INTEGER NOT NULL,
+  credits_used    REAL    NOT NULL DEFAULT 0,
+  queries_count   INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS topics (

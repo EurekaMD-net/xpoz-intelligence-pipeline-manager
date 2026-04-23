@@ -5,6 +5,7 @@
  */
 
 import { getDb } from "./db.js";
+import { PLAN_CREDITS_TOTAL } from "./schema.js";
 import type { Topic } from "../transform/normalizer.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -16,6 +17,23 @@ export interface RunRow {
   raw_post_count: number;
   unique_post_count: number;
   topic_count: number;
+  credits_used: number;
+  queries_count: number;
+}
+
+export interface CreditSummary {
+  totalCreditsUsed: number;
+  totalCreditsRemaining: number;
+  planCreditsTotal: number;
+  percentUsed: number;
+  runCount: number;
+  history: Array<{
+    runId: number;
+    startedAt: string;
+    creditsUsed: number;
+    queriesCount: number;
+    postsRaw: number;
+  }>;
 }
 
 export interface TopicRow {
@@ -33,8 +51,8 @@ export interface TopicRow {
 export function insertRun(params: Omit<RunRow, "id">): number {
   const db = getDb();
   const stmt = db.prepare(`
-    INSERT INTO runs (started_at, duration_ms, raw_post_count, unique_post_count, topic_count)
-    VALUES (@started_at, @duration_ms, @raw_post_count, @unique_post_count, @topic_count)
+    INSERT INTO runs (started_at, duration_ms, raw_post_count, unique_post_count, topic_count, credits_used, queries_count)
+    VALUES (@started_at, @duration_ms, @raw_post_count, @unique_post_count, @topic_count, @credits_used, @queries_count)
   `);
   const result = stmt.run(params);
   return result.lastInsertRowid as number;
@@ -113,4 +131,41 @@ export function getTopicsForRun(runId: number): TopicRow[] {
   return db
     .prepare(`SELECT * FROM topics WHERE run_id = ? ORDER BY rank ASC`)
     .all(runId) as TopicRow[];
+}
+
+// ─── Credits ──────────────────────────────────────────────────────────────────
+
+export function getCreditSummary(): CreditSummary {
+  const db = getDb();
+
+  const rows = db
+    .prepare(
+      `SELECT id, started_at, credits_used, queries_count, raw_post_count
+       FROM runs ORDER BY id DESC`
+    )
+    .all() as Array<{
+    id: number;
+    started_at: string;
+    credits_used: number;
+    queries_count: number;
+    raw_post_count: number;
+  }>;
+
+  const totalUsed = rows.reduce((sum, r) => sum + (r.credits_used ?? 0), 0);
+  const remaining = Math.max(0, PLAN_CREDITS_TOTAL - totalUsed);
+
+  return {
+    totalCreditsUsed: Math.round(totalUsed * 100) / 100,
+    totalCreditsRemaining: Math.round(remaining * 100) / 100,
+    planCreditsTotal: PLAN_CREDITS_TOTAL,
+    percentUsed: Math.round((totalUsed / PLAN_CREDITS_TOTAL) * 10000) / 100,
+    runCount: rows.length,
+    history: rows.map((r) => ({
+      runId: r.id,
+      startedAt: r.started_at,
+      creditsUsed: Math.round((r.credits_used ?? 0) * 100) / 100,
+      queriesCount: r.queries_count ?? 0,
+      postsRaw: r.raw_post_count,
+    })),
+  };
 }
