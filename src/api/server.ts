@@ -156,7 +156,8 @@ app.post("/run", async (c) => {
 
   const body = await c.req.json().catch(() => ({}));
   const notify = body.notify === true;
-  const force = body.force === true;
+  // When operator explicitly requests notify, always force-send (no delta gating)
+  const force = body.force === true || notify;
 
   // Validate: at least subreddits or keywords must be provided
   const subreddits: string[] = Array.isArray(body.subreddits) ? body.subreddits : [];
