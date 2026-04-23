@@ -21,15 +21,16 @@ import { computeDelta } from "./analyze/delta.js";
 import { renderMarkdown, renderJson } from "./report/formatter.js";
 import { sendTelegramDigest } from "./notify/telegram.js";
 import type { IngestSummary } from "./ingest/ingestor.js";
+import type { TopicConfig } from "../config.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface PipelineOptions {
   outputMode: "console" | "json" | "md" | "both";
   notify: boolean;
-  force: boolean;    // force Telegram even if no new/up topics
-  closeDb?: boolean; // close DB connection after run (default: true)
-  topic?: string;    // topic slug (e.g. "aiagents", "crypto"). Defaults to "longevity".
+  force: boolean;      // force Telegram even if no new/up topics
+  closeDb?: boolean;   // close DB connection after run (default: true)
+  topicConfig: TopicConfig; // required — no presets, no defaults
 }
 
 export interface PipelineResult {
@@ -60,19 +61,19 @@ function deltaIcons(d: ReturnType<typeof computeDelta>): string {
 // ─── Pipeline runner ──────────────────────────────────────────────────────────
 
 export async function runPipeline(opts: PipelineOptions): Promise<PipelineResult> {
-  const { outputMode, notify, force, topic } = opts;
+  const { outputMode, notify, force, topicConfig } = opts;
   const shouldCloseDb = opts.closeDb ?? true;
 
   console.log("═══════════════════════════════════════════════════");
   console.log("  Xpoz Intelligence Pipeline — Run");
-  if (topic) console.log(`  Topic: ${topic}`);
+  console.log(`  Topic: ${topicConfig.label}`);
   console.log("═══════════════════════════════════════════════════");
 
   const startedAt = new Date().toISOString();
 
   // ── 1. Ingest ──────────────────────────────────────────────────────────────
   console.log("\n[1/5] Ingesting from Xpoz...");
-  const ingestSummary: IngestSummary = await ingestAll(topic);
+  const ingestSummary: IngestSummary = await ingestAll(topicConfig);
   console.log(
     `      ✓ ${ingestSummary.totalFetched} posts fetched in ${ingestSummary.durationMs}ms` +
     (ingestSummary.totalErrors > 0 ? ` (${ingestSummary.totalErrors} errors)` : "")
@@ -152,15 +153,12 @@ export async function runPipeline(opts: PipelineOptions): Promise<PipelineResult
 
   if (notify) {
     console.log("\n[5/5] Sending Telegram digest...");
-    const { getTopicConfig } = await import("../config.js");
-    const topicCfg = getTopicConfig(topic);
-    const subredditCount = topicCfg.subreddits.length;
     telegramSent = await sendTelegramDigest({
       topics: delta.topics,
       runId,
       totalPosts: normalized.stats.rawPostCount,
       uniquePosts: normalized.stats.afterDedup,
-      subredditCount,
+      subredditCount: topicConfig.subreddits.length,
       durationMs: ingestSummary.durationMs,
       force,
     });

@@ -26,7 +26,6 @@ import { closeDb } from "./store/db.js";
 import { runPipeline } from "./pipeline.js";
 import { startDaemon } from "./scheduler/cron.js";
 import { startApiServer } from "./api/server.js";
-import { VALID_TOPICS, TOPIC_PRESETS } from "../config.js";
 
 // ─── CLI args ─────────────────────────────────────────────────────────────────
 
@@ -48,9 +47,6 @@ const serveMode = args.includes("--serve");
 const portArg = args.includes("--port")
   ? parseInt(args[args.indexOf("--port") + 1], 10)
   : 8086;
-const topicArg = args.includes("--topic")
-  ? args[args.indexOf("--topic") + 1]
-  : undefined;
 
 // ─── History mode ─────────────────────────────────────────────────────────────
 
@@ -86,24 +82,7 @@ function printHistory(): void {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
-function printTopics(): void {
-  console.log("\n═══ Available Topics ═══════════════════════════════");
-  for (const slug of VALID_TOPICS) {
-    const cfg = TOPIC_PRESETS[slug];
-    console.log(`  ${slug.padEnd(12)} — ${cfg.label}`);
-    console.log(`               Subreddits: ${cfg.subreddits.join(", ")}`);
-  }
-  console.log("═══════════════════════════════════════════════════\n");
-  console.log("Usage: npx tsx src/index.ts --topic <slug>");
-  console.log("       npx tsx src/index.ts --topic aiagents --output md\n");
-}
-
 async function main(): Promise<void> {
-  if (showTopics) {
-    printTopics();
-    return;
-  }
-
   if (showHistory) {
     printHistory();
     closeDb();
@@ -130,14 +109,11 @@ async function main(): Promise<void> {
     return; // process.stdin.resume() in startDaemon keeps it alive
   }
 
-  // Single run
-  await runPipeline({
-    outputMode: outputArg,
-    notify: notifyMode,
-    force: forceMode,
-    closeDb: true,
-    topic: topicArg,
-  });
+  // Single run — topic config must be provided via POST /run (API mode).
+  // CLI direct runs are not supported without inline topic config.
+  console.error("Error: Direct CLI runs are not supported. Start the API server with --serve");
+  console.error("and trigger runs via: POST http://localhost:8086/run with subreddits/keywords in the body.");
+  process.exit(1);
 }
 
 main().catch((err) => {

@@ -5,7 +5,7 @@
  * Returns a flat array of normalized posts with source metadata.
  */
 
-import { getTopicConfig, XPOZ_CONFIG, type TopicConfig } from "../../config.js";
+import { XPOZ_CONFIG, type TopicConfig } from "../../config.js";
 import { getSubredditPosts, searchByKeyword, searchTwitterByKeyword, type NormalizedXpozPost } from "./xpoz-client.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -63,12 +63,7 @@ async function runInBatches<T>(
 
 // ─── Main Ingestor ────────────────────────────────────────────────────────────
 
-export async function ingestAll(topicOverride?: string | TopicConfig): Promise<IngestSummary> {
-  const topicCfg: TopicConfig =
-    typeof topicOverride === "object" && topicOverride !== null
-      ? topicOverride
-      : getTopicConfig(typeof topicOverride === "string" ? topicOverride : undefined);
-
+export async function ingestAll(topicCfg: TopicConfig): Promise<IngestSummary> {
   const { subreddits, keywords, allowlist, label } = topicCfg;
 
   const startedAt = Date.now();

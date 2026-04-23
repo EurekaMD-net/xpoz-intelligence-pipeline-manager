@@ -11,6 +11,7 @@
  */
 
 import { runPipeline } from "../pipeline.js";
+import type { TopicConfig } from "../../config.js";
 
 // Default: 07:00 CDMX every day
 const DEFAULT_CRON = "0 7 * * *";
@@ -20,6 +21,7 @@ export async function startDaemon(opts: {
   notify: boolean;
   force: boolean;
   cron?: string;
+  topicConfig?: TopicConfig;
 }): Promise<void> {
   // Dynamic import so we don't pay the dep cost when not in daemon mode
   const { default: cron } = await import("node-cron");
@@ -30,6 +32,14 @@ export async function startDaemon(opts: {
   console.log(`[daemon] notify=${opts.notify}  force=${opts.force}`);
   console.log(`[daemon] First run at next cron tick. Waiting...`);
 
+  if (!opts.topicConfig) {
+    console.error("[daemon] ERROR: topicConfig is required. Daemon cannot run without a topic configuration.");
+    console.error("[daemon] Pass topicConfig when calling startDaemon() or trigger runs via POST /run.");
+    process.exit(1);
+  }
+
+  const topicConfig = opts.topicConfig;
+
   cron.schedule(
     schedule,
     async () => {
@@ -39,6 +49,7 @@ export async function startDaemon(opts: {
           outputMode: "both",
           notify: opts.notify,
           force: opts.force,
+          topicConfig,
         });
       } catch (err) {
         console.error("[daemon] Pipeline error:", err);

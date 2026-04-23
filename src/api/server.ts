@@ -19,7 +19,7 @@ import { join } from "path";
 import { getDb } from "../store/db.js";
 import { getAllRuns, getLastRun, getTopicsForRun, getCreditSummary } from "../store/queries.js";
 import { runPipeline } from "../pipeline.js";
-// CONFIG available if needed for future env-based port config
+import type { TopicConfig } from "../../config.js";
 
 // ─── App ──────────────────────────────────────────────────────────────────────
 
@@ -157,15 +157,41 @@ app.post("/run", async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const notify = body.notify === true;
   const force = body.force === true;
-  const topic = typeof body.topic === "string" ? body.topic : undefined;
+
+  // Validate: at least subreddits or keywords must be provided
+  const subreddits: string[] = Array.isArray(body.subreddits) ? body.subreddits : [];
+  const keywords: string[]   = Array.isArray(body.keywords)   ? body.keywords   : [];
+
+  if (subreddits.length === 0 && keywords.length === 0) {
+    return c.json(
+      { error: "Run requires at least 'subreddits' or 'keywords' in the request body. No presets exist." },
+      400
+    );
+  }
+
+  // Build TopicConfig inline from request
+  const twitterKeywords: string[] | undefined = Array.isArray(body.twitterKeywords)
+    ? body.twitterKeywords
+    : undefined;
+
+  // allowlist: explicit array OR union of subreddits + keywords as fallback
+  const allowlist: Set<string> = Array.isArray(body.allowlist)
+    ? new Set<string>(body.allowlist)
+    : new Set<string>([...subreddits, ...keywords]);
+
+  const label: string = typeof body.label === "string" && body.label.trim()
+    ? body.label.trim()
+    : "Custom Run";
+
+  const topicConfig: TopicConfig = { label, subreddits, keywords, allowlist, twitterKeywords };
 
   runInProgress = true;
 
   // Fire-and-forget — returns immediately, run happens async
   (async () => {
     try {
-      console.log(`[API] On-demand run triggered via POST /run${topic ? ` (topic: ${topic})` : ""}`);
-      await runPipeline({ notify, force, outputMode: "both", closeDb: false, topic });
+      console.log(`[API] On-demand run triggered via POST /run (label: "${label}")`);
+      await runPipeline({ notify, force, outputMode: "both", closeDb: false, topicConfig });
       console.log("[API] On-demand run completed");
     } catch (err) {
       console.error("[API] On-demand run failed:", err);
@@ -176,7 +202,10 @@ app.post("/run", async (c) => {
 
   return c.json({
     status: "started",
-    topic: topic ?? "longevity",
+    label,
+    subreddits,
+    keywords,
+    twitterKeywords: twitterKeywords ?? [],
     message: "Pipeline run started. Poll GET /health or GET /topics/latest for results.",
     estimatedDurationSec: 90,
   });
