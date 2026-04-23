@@ -24,6 +24,8 @@ export interface TopicConfig {
   keywords: string[];
   /** Allowlist: keyword results are filtered to only these subreddits */
   allowlist: Set<string>;
+  /** Optional: Twitter/X keywords to fetch alongside Reddit (opt-in per topic) */
+  twitterKeywords?: string[];
 }
 
 export const TOPIC_PRESETS: Record<string, TopicConfig> = {
@@ -38,6 +40,13 @@ export const TOPIC_PRESETS: Record<string, TopicConfig> = {
       "lifespan extension",
       "cryopreservation brain",
       "telomerase therapy",
+    ],
+    twitterKeywords: [
+      "rapamycin longevity",
+      "lifespan extension",
+      "biohacking aging",
+      "epigenetic reprogramming",
+      "longevity science",
     ],
     allowlist: new Set([
       "immortalists", "longevity", "transhumanism",
@@ -59,6 +68,13 @@ export const TOPIC_PRESETS: Record<string, TopicConfig> = {
       "LLM orchestration",
       "agentic workflow",
       "tool use LLM",
+      "AI coding agent",
+    ],
+    twitterKeywords: [
+      "AI agent framework",
+      "autonomous agent LLM",
+      "agentic workflow",
+      "multi-agent system",
       "AI coding agent",
     ],
     allowlist: new Set([

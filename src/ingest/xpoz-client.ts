@@ -324,3 +324,54 @@ export async function searchByKeyword(query: string): Promise<NormalizedXpozPost
   console.warn(`  [xpoz] No results and no operationId for keyword: "${query}"`);
   return [];
 }
+
+/**
+ * Search Twitter/X for posts matching a keyword.
+ * Uses getTwitterPostsByKeywords — fast (sync) mode, no polling needed.
+ * Maps Twitter fields to NormalizedXpozPost with subreddit="twitter".
+ */
+export async function searchTwitterByKeyword(query: string): Promise<NormalizedXpozPost[]> {
+  console.log(`  [xpoz] searchTwitterByKeyword: "${query}"`);
+  const result = await callMcp("getTwitterPostsByKeywords", {
+    query,
+    limit: 100,
+    filterOutRetweets: true,
+    language: "en",
+    responseType: "fast",
+  });
+  const text = result.content?.find((c) => c.type === "text")?.text ?? "";
+
+  const parsed = parseXpozTextResponse(text, "twitter");
+
+  // Twitter uses "text" field instead of "title" — remap if needed
+  const remapped: NormalizedXpozPost[] = parsed.posts.map((p) => ({
+    ...p,
+    // Prefix ID to avoid collision with Reddit IDs
+    id: `tw_${p.id}`,
+    // Ensure subreddit="twitter" for platform detection downstream
+    subreddit: "twitter",
+    // Twitter score = likesCount (mapped by parseXpozTextResponse via "score"/"upvotes" field alias)
+    url: p.url || `https://twitter.com/i/web/status/${p.id.replace("tw_", "")}`,
+    permalink: p.permalink || p.url || `https://twitter.com/i/web/status/${p.id.replace("tw_", "")}`,
+  }));
+
+  if (remapped.length > 0) {
+    console.log(`    [twitter] ${remapped.length} tweets`);
+    return remapped;
+  }
+
+  // Fall back to polling if we got an operationId
+  const operationId = extractOperationId(text);
+  if (operationId) {
+    console.log(`  [xpoz] Polling Twitter: ${operationId}`);
+    const polled = await pollUntilDone(operationId, "twitter");
+    return polled.map((p) => ({
+      ...p,
+      id: `tw_${p.id}`,
+      subreddit: "twitter",
+    }));
+  }
+
+  console.warn(`  [xpoz] No results and no operationId for twitter keyword: "${query}"`);
+  return [];
+}

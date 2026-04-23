@@ -15,7 +15,8 @@ import type { IngestResult } from "../ingest/ingestor.js";
 
 export interface DeduplicatedPost extends NormalizedXpozPost {
   subreddits: string[];   // all subreddits where this post appeared
-  fetchSources: string[]; // 'subreddit:X' or 'keyword:Y'
+  fetchSources: string[]; // 'subreddit:X' or 'keyword:Y' or 'twitter:Z'
+  platform: "reddit" | "twitter";
 }
 
 export interface Topic {
@@ -52,6 +53,8 @@ function deduplicatePosts(results: IngestResult[]): DeduplicatedPost[] {
       const key = post.id;
       if (!key || !post.title) continue;
 
+      const platform: "reddit" | "twitter" = post.id.startsWith("tw_") ? "twitter" : "reddit";
+
       if (seen.has(key)) {
         const existing = seen.get(key)!;
         if (!existing.fetchSources.includes(source)) existing.fetchSources.push(source);
@@ -62,6 +65,7 @@ function deduplicatePosts(results: IngestResult[]): DeduplicatedPost[] {
           ...post,
           subreddits: [post.subreddit],
           fetchSources: [source],
+          platform,
         });
       }
     }

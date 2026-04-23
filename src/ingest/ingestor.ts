@@ -6,7 +6,7 @@
  */
 
 import { getTopicConfig, XPOZ_CONFIG, type TopicConfig } from "../../config.js";
-import { getSubredditPosts, searchByKeyword, type NormalizedXpozPost } from "./xpoz-client.js";
+import { getSubredditPosts, searchByKeyword, searchTwitterByKeyword, type NormalizedXpozPost } from "./xpoz-client.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -119,10 +119,33 @@ export async function ingestAll(topicOverride?: string | TopicConfig): Promise<I
     }
   }
 
+  // ─── Twitter ingestion (opt-in — only if topic has twitterKeywords) ───────
+  if (topicCfg.twitterKeywords && topicCfg.twitterKeywords.length > 0) {
+    console.log(`[ingestor] Fetching Twitter keywords (batch=2)...`);
+    const twitterTasks = topicCfg.twitterKeywords.map((kw) => () =>
+      safeFetch(`twitter:${kw}`, () => searchTwitterByKeyword(kw))
+    );
+    const twRaw = await runInBatches(twitterTasks, 2, 1000);
+
+    for (const raw of twRaw) {
+      const kw = raw.label.replace("twitter:", "");
+      if (raw.error) {
+        console.warn(`[ingestor] ❌ twitter:"${kw}": ${raw.error}`);
+        results.push({ subreddit: "twitter", source: "keyword", keyword: kw, posts: [], fetchedAt: Date.now(), error: raw.error });
+      } else {
+        const posts = raw.data ?? [];
+        console.log(`[ingestor] ✅ twitter:"${kw}": ${posts.length} tweets`);
+        results.push({ subreddit: "twitter", source: "keyword", keyword: kw, posts, fetchedAt: Date.now() });
+      }
+    }
+  }
+
   const totalFetched = results.reduce((s, r) => s + r.posts.length, 0);
   const totalErrors = results.filter((r) => r.error).length;
   const durationMs = Date.now() - startedAt;
 
-  console.log(`[ingestor] Done — ${totalFetched} posts, ${totalErrors} errors, ${(durationMs / 1000).toFixed(1)}s`);
+  const twitterCount = results.filter((r) => r.subreddit === "twitter").reduce((s, r) => s + r.posts.length, 0);
+  const redditCount = totalFetched - twitterCount;
+  console.log(`[ingestor] Done — ${redditCount} Reddit + ${twitterCount} Twitter = ${totalFetched} total, ${totalErrors} errors, ${(durationMs / 1000).toFixed(1)}s`);
   return { results, totalFetched, totalErrors, durationMs, startedAt };
 }

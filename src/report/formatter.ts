@@ -41,7 +41,7 @@ export function renderMarkdown(input: ReportInput): string {
   const now = new Date().toISOString().split("T")[0];
 
   const lines: string[] = [
-    `# Reddit Intelligence Report — ${now}`,
+    `# Social Intelligence Report — ${now}`,
     ``,
     `> Pipeline: Xpoz API · Phase 2 · Run #${runId} · ${durationMs}ms`,
     `> Posts: ${rawPostCount} raw → ${uniquePostCount} unique · ${delta.topics.length} tópicos`,
@@ -77,18 +77,27 @@ export function renderMarkdown(input: ReportInput): string {
     lines.push(
       `**Score agregado:** ${topic.aggregateScore} | **Posts:** ${topic.posts.length}`
     );
-    lines.push(`**Subreddits:** ${topic.subreddits.map((s) => `r/${s}`).join(", ")}`);
+    // Show sources grouped by platform: Reddit subreddits vs Twitter
+    const redditSubs = topic.subreddits.filter((s) => s !== "twitter");
+    const hasTwitter = topic.subreddits.includes("twitter");
+    const sourceLabel = [
+      ...(redditSubs.length > 0 ? [`r/${redditSubs.join(", r/")}`] : []),
+      ...(hasTwitter ? ["𝕏 Twitter"] : []),
+    ].join(" · ");
+    lines.push(`**Fuentes:** ${sourceLabel || "n/a"}`);
     lines.push(``);
+    const repPlatform = topic.representative.subreddit === "twitter" ? "𝕏" : "Reddit";
     lines.push(
       `**Post representativo:** [${topic.representative.title}](${topic.representative.url})`
     );
-    lines.push(`↳ Score: ${topic.representative.score} · by u/${topic.representative.author}`);
+    lines.push(`↳ [${repPlatform}] Score: ${topic.representative.score} · by u/${topic.representative.author}`);
     lines.push(``);
 
     if (topic.posts.length > 1) {
       lines.push(`**Otros posts del cluster:**`);
       for (const p of topic.posts.slice(1, 4)) {
-        lines.push(`- [${p.title}](${p.url}) — score: ${p.score}`);
+        const pPlatform = p.subreddit === "twitter" ? "𝕏" : "Reddit";
+        lines.push(`- [${p.title}](${p.url}) — [${pPlatform}] score: ${p.score}`);
       }
     }
 
