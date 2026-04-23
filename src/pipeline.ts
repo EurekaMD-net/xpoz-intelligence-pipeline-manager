@@ -14,6 +14,7 @@ import {
   insertTopicsForRun,
   getPreviousRun,
   getTopicsForRun,
+  clearAllData,
 } from "./store/queries.js";
 import { closeDb } from "./store/db.js";
 import { calcCredits } from "./store/schema.js";
@@ -70,6 +71,13 @@ export async function runPipeline(opts: PipelineOptions): Promise<PipelineResult
   console.log("═══════════════════════════════════════════════════");
 
   const startedAt = new Date().toISOString();
+
+  // ── 0. Clean slate — wipe previous data before every run ──────────────────
+  console.log("\n[0/5] Clearing previous run data...");
+  const cleared = clearAllData();
+  console.log(
+    `      ✓ Cleared: ${cleared.deletedRuns} runs, ${cleared.deletedTopics} topics, ${cleared.deletedPosts} posts`
+  );
 
   // ── 1. Ingest ──────────────────────────────────────────────────────────────
   console.log("\n[1/5] Ingesting from Xpoz...");

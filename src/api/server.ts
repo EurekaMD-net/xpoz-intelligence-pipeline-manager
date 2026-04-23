@@ -17,7 +17,7 @@ import { serve } from "@hono/node-server";
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { getDb } from "../store/db.js";
-import { getAllRuns, getLastRun, getTopicsForRun, getCreditSummary } from "../store/queries.js";
+import { getAllRuns, getLastRun, getTopicsForRun, getCreditSummary, clearAllData } from "../store/queries.js";
 import { runPipeline } from "../pipeline.js";
 import type { TopicConfig } from "../../config.js";
 
@@ -217,6 +217,21 @@ app.post("/run", async (c) => {
 app.get("/run/status", (c) => {
   return c.json({
     inProgress: runInProgress,
+  });
+});
+
+// ─── Reset ────────────────────────────────────────────────────────────────────
+
+app.post("/reset", (c) => {
+  if (runInProgress) {
+    return c.json({ error: "A run is in progress — cannot reset now" }, 409);
+  }
+  const result = clearAllData();
+  console.log(`[API] /reset called — cleared ${result.deletedRuns} runs, ${result.deletedTopics} topics, ${result.deletedPosts} posts`);
+  return c.json({
+    cleared: true,
+    tables: ["runs", "topics", "topic_posts"],
+    ...result,
   });
 });
 

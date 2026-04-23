@@ -65,7 +65,7 @@ server.tool(
       .max(20)
       .optional()
       .describe(
-        "Number of top topics to return. Default: 10. Max: 20. Use 3-5 for a quick summary, 10+ for full analysis."
+        "Number of top topics to return. Default: 10. Max: 20. Use 3-5 for a quick summary, 10+ for full analysis.",
       ),
   },
   async ({ limit }) => {
@@ -79,7 +79,7 @@ server.tool(
         },
       ],
     };
-  }
+  },
 );
 
 // ── Tool: xpoz_get_digest ──────────────────────────────────────────────────────
@@ -101,7 +101,7 @@ server.tool(
         },
       ],
     };
-  }
+  },
 );
 
 // ── Tool: xpoz_trigger_run ─────────────────────────────────────────────────────
@@ -109,15 +109,44 @@ server.tool(
 server.tool(
   "xpoz_trigger_run",
   "Trigger a new Reddit Intelligence Pipeline run asynchronously. " +
-    "The run ingests posts from the configured subreddits via Xpoz, normalizes, " +
-    "clusters into topics based on the run's keywords, compares with previous run, and saves to SQLite. " +
-    "Returns immediately with a runId — use xpoz_get_topics after ~2 minutes to see results. " +
-    "Use this when the user explicitly asks to refresh the intel, run a new analysis, " +
-    "or when the last run is older than 24 hours and fresh data is needed. " +
-    "DO NOT trigger automatically — only when the user requests it.",
-  {},
-  async () => {
-    const data = await apiPost("/run");
+    "The run ingests posts from the specified subreddits via Xpoz, normalizes, " +
+    "clusters into topics based on the provided keywords, compares with previous run, and saves to SQLite. " +
+    "Returns immediately with run metadata — poll GET /health or use xpoz_get_topics after ~2 min. " +
+    "Requires a topic seed: label + subreddits + keywords (no defaults). " +
+    "Pass notify=true to send a Telegram digest to the operator on completion. " +
+    "Use when the user explicitly asks to run a new analysis with a specific seed/theme.",
+  {
+    label: z
+      .string()
+      .min(1)
+      .describe(
+        "Human-readable seed/topic label (e.g., 'NVDA', 'Red Light Therapy', 'longevity')",
+      ),
+    subreddits: z
+      .array(z.string())
+      .min(1)
+      .describe(
+        "Subreddits to ingest, without 'r/' prefix (e.g., ['longevity','Biohackers'])",
+      ),
+    keywords: z
+      .array(z.string())
+      .min(1)
+      .describe(
+        "Keywords to filter/score posts (e.g., ['longevity','healthspan','nad+'])",
+      ),
+    twitterKeywords: z
+      .array(z.string())
+      .optional()
+      .describe("Optional Twitter keywords for cross-source enrichment"),
+    notify: z
+      .boolean()
+      .optional()
+      .describe(
+        "If true, send a Telegram digest to the operator chat on completion. Default: false",
+      ),
+  },
+  async (input) => {
+    const data = await apiPost("/run", input);
     return {
       content: [
         {
@@ -126,7 +155,7 @@ server.tool(
         },
       ],
     };
-  }
+  },
 );
 
 // ── Tool: xpoz_get_history ─────────────────────────────────────────────────────
@@ -148,7 +177,7 @@ server.tool(
         },
       ],
     };
-  }
+  },
 );
 
 // ── Start ──────────────────────────────────────────────────────────────────────

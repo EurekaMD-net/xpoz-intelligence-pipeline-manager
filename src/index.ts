@@ -19,9 +19,10 @@
  *   npx tsx src/index.ts --topic aiagents        # run with AI agents topic
  *   npx tsx src/index.ts --topic crypto          # run with crypto topic
  *   npx tsx src/index.ts --topics                # list available topics
+ *   npx tsx src/index.ts --clean                 # truncate all DB data and exit
  */
 
-import { getAllRuns } from "./store/queries.js";
+import { getAllRuns, clearAllData } from "./store/queries.js";
 import { closeDb } from "./store/db.js";
 import { runPipeline } from "./pipeline.js";
 import { startDaemon } from "./scheduler/cron.js";
@@ -37,6 +38,7 @@ const outputArg = args.includes("--output")
 
 const showHistory = args.includes("--history");
 const showTopics = args.includes("--topics");
+const cleanMode = args.includes("--clean");
 const daemonMode = args.includes("--daemon");
 const notifyMode = args.includes("--notify");
 const forceMode = args.includes("--force");
@@ -83,6 +85,13 @@ function printHistory(): void {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
+  if (cleanMode) {
+    const result = clearAllData();
+    console.log(`✓ DB cleared: ${result.deletedRuns} runs, ${result.deletedTopics} topics, ${result.deletedPosts} posts`);
+    closeDb();
+    return;
+  }
+
   if (showHistory) {
     printHistory();
     closeDb();

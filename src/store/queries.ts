@@ -133,6 +133,47 @@ export function getTopicsForRun(runId: number): TopicRow[] {
     .all(runId) as TopicRow[];
 }
 
+// ─── Cleanup ──────────────────────────────────────────────────────────────────
+
+/**
+ * Delete all data associated with a specific run (topics + posts).
+ * Safe to call before re-inserting data for the same semantic run.
+ * Does NOT delete the run row itself — that is inserted fresh each time.
+ */
+export function clearRunData(runId: number): void {
+  const db = getDb();
+  db.transaction(() => {
+    // Delete posts first (FK references topic_id)
+    db.prepare(`
+      DELETE FROM topic_posts WHERE topic_id IN (
+        SELECT id FROM topics WHERE run_id = ?
+      )
+    `).run(runId);
+    db.prepare(`DELETE FROM topics WHERE run_id = ?`).run(runId);
+    db.prepare(`DELETE FROM runs WHERE id = ?`).run(runId);
+  })();
+}
+
+/**
+ * Truncate ALL pipeline data (runs, topics, topic_posts) and reset
+ * the autoincrement counters. Use before a clean-slate run or on
+ * explicit /reset requests.
+ */
+export function clearAllData(): { deletedRuns: number; deletedTopics: number; deletedPosts: number } {
+  const db = getDb();
+  let deletedPosts = 0;
+  let deletedTopics = 0;
+  let deletedRuns = 0;
+  db.transaction(() => {
+    deletedPosts = (db.prepare(`DELETE FROM topic_posts`).run()).changes;
+    deletedTopics = (db.prepare(`DELETE FROM topics`).run()).changes;
+    deletedRuns = (db.prepare(`DELETE FROM runs`).run()).changes;
+    // Reset autoincrement sequences
+    db.prepare(`DELETE FROM sqlite_sequence WHERE name IN ('runs','topics','topic_posts')`).run();
+  })();
+  return { deletedRuns, deletedTopics, deletedPosts };
+}
+
 // ─── Credits ──────────────────────────────────────────────────────────────────
 
 export function getCreditSummary(): CreditSummary {

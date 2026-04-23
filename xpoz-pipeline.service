@@ -13,7 +13,7 @@ Environment=TZ=America/Mexico_City
 # Load Telegram credentials from environment
 EnvironmentFile=-/root/claude/projects/xpoz-pipeline/.env
 
-ExecStart=/usr/bin/npx tsx src/index.ts --serve --daemon --notify
+ExecStart=/usr/bin/npx tsx src/index.ts --serve
 Restart=always
 RestartSec=10
 StandardOutput=journal
