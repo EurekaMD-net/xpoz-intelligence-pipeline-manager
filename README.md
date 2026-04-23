@@ -1,142 +1,254 @@
 # Xpoz Intelligence Pipeline Manager
 
-Redefinición del scraper de Reddit como un pipeline de inteligencia utilizando la infraestructura de Xpoz para el acceso a datos, eliminando la necesidad de gestión directa de autenticación y rate-limiting.
+> Self-hosted intelligence pipeline that scrapes Reddit (and optionally Twitter/X) via the Xpoz MCP API, clusters posts into semantic topics, computes deltas between runs, and delivers a markdown digest — on-demand or via Jarvis voice command.
 
 ---
 
-## Plan de Arquitectura
+## What it does
 
-### Premisa
-
-El proyecto deja de ser un "scraper" (resolver autenticación + rate limiting) y se convierte en un **pipeline de inteligencia**: Xpoz resuelve el acceso a los datos, nosotros construimos la capa de valor encima.
+1. **Ingests** posts from Reddit subreddits + keyword searches, and optionally Twitter/X keywords — all in parallel, batched.
+2. **Normalizes** raw posts into a unified schema, deduplicates by URL.
+3. **Clusters** posts into semantic topics using dynamic keyword matching + subreddit grouping. Unclustered posts go to "Other / Emerging".
+4. **Computes deltas** — new vs. existing topics since the last run, scores momentum.
+5. **Persists** runs, topics, and credit usage to SQLite.
+6. **Reports** via markdown digest (file + console) and optional Telegram notification.
+7. **Exposes** everything via an HTTP API on `localhost:8086` for Jarvis integration.
+8. **Exposes** a Model Context Protocol (MCP) server so Jarvis can trigger runs and query results directly as tools.
 
 ---
 
-### Arquitectura General
+## Architecture
 
 ```
-Xpoz API → Ingestión → Normalización → Análisis → Storage → Output
+src/
+├── index.ts              # Entry point (HTTP server + CLI flag handling)
+├── pipeline.ts           # Core runner: Ingest → Normalize → Persist → Delta → Report → Notify
+├── config.ts             # TopicConfig interface, Xpoz API credentials
+├── mcp-server.ts         # MCP server (stdio) — exposes pipeline as Jarvis tools
+│
+├── ingest/
+│   ├── ingestor.ts       # Parallel multi-source orchestrator (Reddit + Twitter)
+│   └── xpoz-client.ts    # Xpoz API client (subreddit, keyword, Twitter — with async polling)
+│
+├── transform/
+│   └── normalizer.ts     # Dedup + cluster assignment → NormalizedPost[]
+│
+├── analyze/
+│   └── delta.ts          # New vs. previous run topic comparison
+│
+├── store/
+│   ├── db.ts             # SQLite singleton (WAL mode)
+│   ├── schema.ts         # DDL + credit calculation
+│   └── queries.ts        # All read/write queries — including clearAllData(), clearRunData()
+│
+├── report/
+│   └── formatter.ts      # Markdown + JSON digest renderers
+│
+├── notify/
+│   └── telegram.ts       # Optional Telegram digest delivery
+│
+├── api/
+│   └── server.ts         # Hono HTTP server — REST endpoints + POST /run + POST /reset
+│
+└── scheduler/
+    └── index.ts          # Cron-based scheduled runs (optional)
+
+scripts/
+└── restart.sh            # One-command clean restart (kills old process, clears tsx cache, starts fresh)
 ```
 
 ---
 
-### Módulos
+## HTTP API
 
-**1. Ingestor** (`ingest/`)
-- Recibe una lista de subreddits target + keywords
-- Llama a Xpoz en paralelo: `getRedditSubredditWithPostsByName` + `getRedditPostsByKeywords`
-- Configurable: frecuencia, profundidad (top 100, hot, new), ventana de tiempo
-- Output: JSON crudo normalizado
+Server runs on `localhost:8086` (not exposed publicly).
 
-**2. Normalizador** (`transform/`)
-- Deduplica posts que aparecen en múltiples subs
-- Extrae campos relevantes: título, score, comments, fecha, subreddit, URL
-- Filtra ruido (score mínimo configurable, eliminación de bots conocidos)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/health` | Service status, last run info, credit summary |
+| `GET` | `/runs` | List all runs with stats |
+| `GET` | `/topics/latest` | Top topics from last run (JSON) |
+| `GET` | `/digest/latest` | Markdown digest from last run (text/plain) |
+| `POST` | `/run` | Trigger a pipeline run on-demand |
+| `POST` | `/reset` | Clear all DB data (runs, topics, posts) — blocked if run in progress |
+| `GET` | `/credits` | Credit usage summary |
 
-**3. Analizador Semántico** (`analyze/`)
-- Agrupa posts por tópico (clustering por embeddings o por LLM call)
-- Genera un "tópico canónico" por cluster: título, posts relacionados, score agregado
-- Detecta tópicos **nuevos vs. recurrentes** (comparando con run anterior)
-- Output: ranked list de tópicos con metadata
+### POST /run — payload
 
-**4. Storage** (`store/`)
-- SQLite local (simple, sin dependencias)
-- Tablas: `runs`, `posts`, `topics`, `topic_history`
-- Permite consultas históricas: "¿cuándo surgió este tópico?", "¿está creciendo o muriendo?"
+```json
+{
+  "label": "NVDA Intelligence",
+  "subreddits": ["nvidia", "stocks", "investing"],
+  "keywords": ["NVDA stock", "Nvidia AI chips", "Nvidia earnings"],
+  "twitterKeywords": ["NVDA", "Nvidia AI", "Nvidia stock"],
+  "allowlist": ["nvidia", "stocks", "investing"],
+  "notify": true
+}
+```
 
-**5. Output** (`report/`)
-- Markdown formateado (para Jarvis / Telegram)
-- JSON estructurado (para integraciones futuras: LivingJoyfully, EurekaMD)
-- Opcional: comparativa vs. run anterior ("subió", "bajó", "nuevo")
+- `subreddits`, `keywords`, `twitterKeywords` — at least one required.
+- `twitterKeywords` alone → Twitter-only run (Reddit skipped entirely).
+- `allowlist` — optional filter: keyword-Reddit results restricted to these subreddits. Has no effect on Twitter results.
+- `notify` — if `true`, sends Telegram digest when run completes (requires `TELEGRAM_BOT_TOKEN` + `TELEGRAM_OWNER_CHAT_ID` env vars).
+
+### POST /reset — response
+
+```json
+{ "cleared": true, "tables": ["posts", "topics", "runs"] }
+```
+
+Returns `409 Conflict` if a run is currently in progress.
 
 ---
 
-### Configuración
+## MCP Tools (Jarvis integration)
 
-Un solo archivo `config.ts` con:
-- Subreddits por dominio (longevity, immortality, transhumanism, biohacking)
-- Keywords adicionales para búsqueda cruzada
-- Score mínimo, número de posts por subreddit, idioma
-- Credenciales Xpoz (Bearer token)
+The MCP server (`mcp-server.ts`) exposes these tools to Jarvis:
 
----
-
-### Modos de Ejecución
-
-| Modo | Descripción |
+| Tool | Description |
 |------|-------------|
-| `run once` | Un análisis manual, output a consola/archivo |
-| `scheduled` | Cron diario, guarda en SQLite, alerta si hay tópicos nuevos |
-| `query` | Consulta histórica: "¿qué tópicos surgieron esta semana?" |
+| `run_pipeline` | Trigger a run with a seed (label + subreddits + keywords) |
+| `get_latest_topics` | Retrieve top topics from the most recent run |
+| `get_digest` | Get the markdown digest from the most recent run |
+| `get_run_history` | List past runs with stats |
+| `get_credit_summary` | Show credit usage vs. plan limit |
+
+Registered in mission-control's `mcp-servers.json` with `deferredTools: true`.
 
 ---
 
-### Integración con Jarvis (Fase 2)
+## Clean-slate guarantee
 
-- El Intelligence Depot puede consumir el output del pipeline como señal diaria
-- Jarvis puede llamar `query` para incluir longevity intel en el reporte matutino
-- Eventualmente: alertas Flash si surge un tópico con velocidad inusual
+Every run begins with a full DB wipe — no data bleeds between seeds:
 
----
+1. **Step [0/5]** in `pipeline.ts` calls `clearAllData()` before ingesting anything.
+2. `clearAllData()` truncates `posts`, `topics`, and `runs`, and resets `sqlite_sequence` so IDs restart from 1.
+3. The `/reset` endpoint provides manual on-demand clearing (useful before a fresh batch of runs).
 
-### Fases de Construcción
-
-| Fase | Qué construimos | Criterio de éxito |
-|------|----------------|-------------------|
-| **Fase 1** | Ingestor + Normalizador | Run manual produce JSON limpio de 3+ subs |
-| **Fase 2** | Analizador + Storage | Top 10 tópicos guardados en SQLite, comparables entre runs |
-| **Fase 3** | Output + Reporte | Markdown/JSON generado automáticamente |
-| **Fase 4** | Scheduling + Alertas | Corre diario, alerta en Telegram si hay tópico nuevo |
-| **Fase 5** | Integración Jarvis | Aparece en Intel Depot o reporte matutino |
+This ensures topic clustering is never contaminated by previous seeds.
 
 ---
 
-### Lo que NO construimos (por ahora)
+## Twitter-only runs
 
-- No scraping directo a Reddit (Xpoz lo hace)
-- No UI / dashboard web
-- No análisis de sentimiento (overkill para v1)
-- No soporte multi-plataforma (solo Reddit por ahora)
+Pass only `twitterKeywords` (no `subreddits`, no `keywords`):
 
----
+```json
+{
+  "label": "Longevity Twitter",
+  "twitterKeywords": ["longevity", "healthspan", "lifespan extension", "biohacking"]
+}
+```
 
-### Stack Tecnológico
+Reddit steps are skipped entirely. The `allowlist` filter does not apply to Twitter results.
 
-| Capa | Tecnología |
-|------|-----------|
-| Lenguaje | TypeScript (ESM) |
-| Runtime | Node.js / tsx |
-| Acceso a datos | Xpoz MCP API (Bearer token) |
-| Storage | SQLite (`better-sqlite3`) |
-| Análisis semántico | LLM call (Claude) via Jarvis |
-| Output | Markdown + JSON |
-| Scheduler (fase 4) | `node-cron` |
+> **Note:** Xpoz Twitter coverage is more limited than Reddit. A run with 5 Twitter keywords consumes ~25 credits and may return fewer posts than an equivalent Reddit run.
 
 ---
 
-## Xpoz API
+## Xpoz API — key behaviors
 
-- **Endpoint:** `https://mcp.xpoz.ai/mcp`
-- **Auth:** `Authorization: Bearer <token>`
-- **Herramientas Reddit disponibles:**
-  - `getRedditSubredditWithPostsByName`
-  - `getRedditPostsByKeywords`
-  - `searchRedditSubreddits`
-  - + 4 herramientas adicionales
-- **Plan:** Sin expiración · `isActive: true`
-- **Cuenta:** peter.blades@gmail.com (Google OAuth)
+| Behavior | Detail |
+|----------|--------|
+| **Async with polling** | Subreddit fetches return an `operationId`. Client polls `checkOperationStatus` until `status: success`. |
+| **Keyword search** | May be synchronous depending on `responseType`. |
+| **Credit consumption** | ~0.5–1.5 credits per subreddit task. Tracked and persisted per run. |
+| **Score field** | Keyword results return `score: 0` by default. The pipeline does not filter by minimum score (would eliminate all keyword results). |
+| **Parameter naming** | `fields` (keywords in keyword search) ≠ `postFields` (subreddits in subreddit search). |
 
 ---
 
-## Estado del Proyecto
+## Operations
 
-| Campo | Estado |
-|-------|--------|
-| Repo | ✅ Creado |
-| Plan de arquitectura | ✅ Documentado |
-| Código | 🔜 Fase 1 pendiente |
-| Xpoz API | ✅ Verificada y activa |
+### Start / restart server
+
+```bash
+# Clean restart (kills old process + clears tsx cache):
+bash /root/claude/projects/xpoz-pipeline/scripts/restart.sh
+
+# Full clean restart (also wipes DB):
+bash /root/claude/projects/xpoz-pipeline/scripts/restart.sh --clean
+```
+
+Server logs to `/tmp/xpoz-server.log`.
+
+### Check status
+
+```bash
+curl -s http://127.0.0.1:8086/health | jq .
+```
+
+### Trigger a run manually
+
+```bash
+curl -s -X POST http://127.0.0.1:8086/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "label": "AI Agents",
+    "subreddits": ["artificial", "singularity", "MachineLearning", "LocalLLaMA", "ChatGPT"],
+    "keywords": ["AI agents", "autonomous agents", "agentic AI", "LLM agents"],
+    "allowlist": ["artificial", "singularity", "MachineLearning", "LocalLLaMA", "ChatGPT"]
+  }' | jq .
+```
+
+### Reset DB
+
+```bash
+curl -s -X POST http://127.0.0.1:8086/reset | jq .
+```
 
 ---
 
-*Iniciado: 22 abril 2026 · EurekaMD-net*
+## Environment variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `XPOZ_API_KEY` | ✅ | Xpoz MCP API key |
+| `TELEGRAM_BOT_TOKEN` | Optional | Telegram bot token for digest delivery |
+| `TELEGRAM_OWNER_CHAT_ID` | Optional | Telegram chat ID for digest delivery |
+
+---
+
+## Seeds run to date
+
+| Seed | Posts | Topics | Duration | Credits |
+|------|-------|--------|----------|---------|
+| México | 175 | 6 | 76s | — |
+| AI Agents | 267 | 7 | 36s | — |
+| CRM | 246 | 10 | 77s | — |
+| NVDA | 558 | — | — | — |
+| Red Light Therapy | 358 | 8 | 73s | 76.80 |
+| Bitcoin | — | — | — | — |
+| Longevity (Twitter-only) | 0 | — | 32s | 25.00 |
+
+> Total credits consumed across all runs: ~321 / 5,000 (6.4% of plan)
+
+---
+
+## Development
+
+```bash
+npm run dev        # tsx watch (hot reload)
+npm run build      # tsc → dist/
+npx tsc --noEmit   # typecheck — must be zero errors
+```
+
+**Stack:** TypeScript · ESM · Hono · better-sqlite3 · @modelcontextprotocol/sdk · node-cron
+
+---
+
+## Status: ✅ Complete
+
+All phases shipped:
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 0 | Xpoz API integration + SQLite storage | ✅ |
+| 1 | Multi-subreddit parallel ingest | ✅ |
+| 2 | Dynamic topic clustering + delta analysis | ✅ |
+| 3 | Markdown/JSON reports + Telegram notify | ✅ |
+| 4 | HTTP API server (`localhost:8086`) | ✅ |
+| 5 | MCP server — Jarvis tool integration | ✅ |
+| A | Twitter/X integration (opt-in per run) | ✅ |
+| B | Twitter-only runs (no Reddit required) | ✅ |
+| C | Clean-slate DB before every run | ✅ |
