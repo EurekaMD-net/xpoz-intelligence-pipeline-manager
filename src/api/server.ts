@@ -38,6 +38,7 @@ import {
 import { runPipeline } from "../pipeline.js";
 import type { PipelineResult } from "../pipeline.js";
 import type { TopicConfig } from "../../config.js";
+import { searchByKeyword } from "../ingest/xpoz-client.js";
 
 // ─── App ──────────────────────────────────────────────────────────────────────
 
@@ -443,6 +444,103 @@ app.post("/run", requireToken, async (c) => {
     message: `Pipeline run started. Poll GET /run/jobs/${jobId} for status.`,
     estimatedDurationSec: 90,
   });
+});
+
+// ─── Keyword search (synchronous, per-keyword) ────────────────────────────────
+//
+// Thin wrapper over `searchByKeyword()` from xpoz-client. Exists so callers
+// that need per-term Reddit confluence data (e.g. williams-entry-radar S2
+// ticker enrichment) don't have to reimplement the MCP protocol or bundle
+// the bearer token. Auth-gated on X-Xpoz-Token like /run.
+//
+// One keyword per request — keeps timeouts and error handling per-term so one
+// hung ticker doesn't poison the whole batch.
+
+const SEARCH_TIMEOUT_MS = 90_000;
+
+app.post("/search/keyword", requireToken, async (c) => {
+  let body: Record<string, unknown>;
+  try {
+    body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+
+  const keyword = typeof body.keyword === "string" ? body.keyword.trim() : "";
+  if (!keyword) {
+    return c.json({ error: "'keyword' is required (non-empty string)." }, 400);
+  }
+
+  // Reject non-finite / non-positive limit explicitly — otherwise
+  // Math.max(1, Math.min(100, NaN)) === NaN → .slice(0, NaN) === []
+  // would silently return empty results instead of surfacing the misuse.
+  const limitRaw = body.limit === undefined ? 25 : body.limit;
+  if (
+    typeof limitRaw !== "number" ||
+    !Number.isFinite(limitRaw) ||
+    limitRaw < 1
+  ) {
+    return c.json(
+      { error: "'limit' must be a finite positive number (1-100)." },
+      400,
+    );
+  }
+  const limit = Math.min(100, Math.floor(limitRaw));
+
+  try {
+    const timeout = new Promise<never>((_, reject) =>
+      setTimeout(
+        () =>
+          reject(
+            new Error(
+              `searchByKeyword("${keyword}") exceeded ${SEARCH_TIMEOUT_MS}ms`,
+            ),
+          ),
+        SEARCH_TIMEOUT_MS,
+      ).unref(),
+    );
+    const posts = await Promise.race([searchByKeyword(keyword), timeout]);
+
+    const sorted = [...posts]
+      .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+      .slice(0, limit);
+    const top = sorted[0];
+
+    return c.json({
+      keyword,
+      postCount: sorted.length,
+      topPost: top
+        ? {
+            title: top.title,
+            score: top.score,
+            subreddit: top.subreddit,
+            url: top.url,
+          }
+        : null,
+      posts: sorted.map((p) => ({
+        title: p.title,
+        score: p.score,
+        subreddit: p.subreddit,
+        url: p.url,
+        createdUtc: p.createdUtc,
+      })),
+    });
+  } catch (err) {
+    // Full error (URLs, tokens, stack frames) goes to the journal — not the
+    // response body. Callers get an opaque tag so logs that make it to public
+    // surfaces (GitHub commit bodies, signals.md snippets) can't leak the
+    // upstream MCP URL or any credential material.
+    const msg = err instanceof Error ? err.message : String(err);
+    const isTimeout = /exceeded \d+ms/.test(msg);
+    console.warn(`[API] /search/keyword "${keyword}" failed:`, msg);
+    return c.json(
+      {
+        error: isTimeout ? "Keyword search timed out" : "Keyword search failed",
+        keyword,
+      },
+      502,
+    );
+  }
 });
 
 // ─── Run status (backward-compat: boolean) ────────────────────────────────────

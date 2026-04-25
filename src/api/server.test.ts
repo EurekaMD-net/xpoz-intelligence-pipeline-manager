@@ -7,6 +7,12 @@ vi.mock("../pipeline.js", () => ({
   runPipeline: runPipelineMock,
 }));
 
+// Mock searchByKeyword so /search/keyword tests don't hit the real MCP server.
+const searchByKeywordMock = vi.hoisted(() => vi.fn());
+vi.mock("../ingest/xpoz-client.js", () => ({
+  searchByKeyword: searchByKeywordMock,
+}));
+
 // Mock the store layer so server.ts imports don't try to open data/pipeline.db
 vi.mock("../store/queries.js", () => ({
   getAllRuns: () => [],
@@ -234,5 +240,131 @@ describe("API server — auth enabled", () => {
     const { status, body } = await fetchJson(`${baseUrl}/health`);
     expect(status).toBe(200);
     expect(body.authEnabled).toBe(true);
+  });
+
+  it("POST /search/keyword without token returns 401", async () => {
+    const { status } = await fetchJson(`${baseUrl}/search/keyword`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ keyword: "AAPL" }),
+    });
+    expect(status).toBe(401);
+  });
+
+  it("POST /search/keyword rejects empty keyword with 400", async () => {
+    const { status, body } = await fetchJson(`${baseUrl}/search/keyword`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Xpoz-Token": TOKEN,
+      },
+      body: JSON.stringify({ keyword: "   " }),
+    });
+    expect(status).toBe(400);
+    expect(String(body.error)).toMatch(/'keyword' is required/i);
+  });
+
+  it("POST /search/keyword returns sorted + trimmed results", async () => {
+    searchByKeywordMock.mockReset();
+    searchByKeywordMock.mockResolvedValueOnce([
+      {
+        id: "a",
+        title: "Low-score post",
+        subreddit: "stocks",
+        score: 5,
+        numComments: 1,
+        url: "u1",
+        permalink: "p1",
+        author: "x",
+        createdUtc: 100,
+        selftext: "",
+      },
+      {
+        id: "b",
+        title: "Top post",
+        subreddit: "investing",
+        score: 42,
+        numComments: 9,
+        url: "u2",
+        permalink: "p2",
+        author: "y",
+        createdUtc: 200,
+        selftext: "",
+      },
+    ]);
+    const { status, body } = await fetchJson(`${baseUrl}/search/keyword`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Xpoz-Token": TOKEN,
+      },
+      body: JSON.stringify({ keyword: "AAPL", limit: 5 }),
+    });
+    expect(status).toBe(200);
+    expect(body.keyword).toBe("AAPL");
+    expect(body.postCount).toBe(2);
+    const top = body.topPost as { title: string; score: number };
+    expect(top.title).toBe("Top post");
+    expect(top.score).toBe(42);
+    expect(searchByKeywordMock).toHaveBeenCalledWith("AAPL");
+  });
+
+  it("POST /search/keyword returns 502 with sanitized error on MCP failure", async () => {
+    searchByKeywordMock.mockReset();
+    // Error message contains a URL-looking fragment — assert it's NOT echoed
+    // in the response body (the raw msg should stay in the journal only).
+    searchByKeywordMock.mockRejectedValueOnce(
+      new Error("fetch https://mcp.xpoz.ai/mcp failed"),
+    );
+    const { status, body } = await fetchJson(`${baseUrl}/search/keyword`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Xpoz-Token": TOKEN,
+      },
+      body: JSON.stringify({ keyword: "TSLA" }),
+    });
+    expect(status).toBe(502);
+    expect(String(body.error)).toBe("Keyword search failed");
+    expect(String(body.error)).not.toContain("mcp.xpoz.ai");
+    expect(body.keyword).toBe("TSLA");
+  });
+
+  it("POST /search/keyword returns topPost:null when MCP returns zero posts", async () => {
+    searchByKeywordMock.mockReset();
+    searchByKeywordMock.mockResolvedValueOnce([]);
+    const { status, body } = await fetchJson(`${baseUrl}/search/keyword`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Xpoz-Token": TOKEN,
+      },
+      body: JSON.stringify({ keyword: "NOSUCHTICKER" }),
+    });
+    expect(status).toBe(200);
+    expect(body.postCount).toBe(0);
+    expect(body.topPost).toBeNull();
+    expect(body.posts).toEqual([]);
+  });
+
+  it("POST /search/keyword rejects non-finite/non-positive limit with 400", async () => {
+    const bad = [
+      { limit: -5 },
+      { limit: 0 },
+      { limit: Number.NaN },
+      { limit: "25" },
+    ];
+    for (const extra of bad) {
+      const { status, body } = await fetchJson(`${baseUrl}/search/keyword`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Xpoz-Token": TOKEN,
+        },
+        body: JSON.stringify({ keyword: "AAPL", ...extra }),
+      });
+      expect(status).toBe(400);
+      expect(String(body.error)).toMatch(/limit/i);
+    }
   });
 });
