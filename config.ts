@@ -1,10 +1,16 @@
 // ─── Xpoz Intelligence Pipeline — Configuration ───────────────────────────
 
+function requireEnv(name: string): string {
+  const v = process.env[name];
+  if (!v) throw new Error(`[config] Missing required env var: ${name}`);
+  return v;
+}
+
 export const XPOZ_CONFIG = {
   /** MCP server endpoint */
   endpoint: "https://mcp.xpoz.ai/mcp",
-  /** Bearer token (peter.blades@gmail.com account, no expiration) */
-  apiKey: "K3BxffCU1FsbqJecKRkfLTNfECtsDp1Rq3XNR1PVcVCVdrLffiz4lgJbeGix23CKaVoaFg4",
+  /** Bearer token — set via XPOZ_API_KEY in .env (gitignored). */
+  apiKey: requireEnv("XPOZ_API_KEY"),
   /** Max posts to fetch per subreddit */
   postsLimit: 100,
   /** Minimum score to include a post (filter noise) */
