@@ -599,9 +599,9 @@ export function startApiServer(port = 8086): void {
       `[API] Auth enabled — X-Xpoz-Token required on POST /run and POST /reset.`,
     );
   }
-  serve({ fetch: app.fetch, port }, () => {
+  serve({ fetch: app.fetch, port, hostname: "127.0.0.1" }, () => {
     console.log(
-      `[API] Xpoz Intelligence Pipeline API listening on port ${port}`,
+      `[API] Xpoz Intelligence Pipeline API listening on 127.0.0.1:${port}`,
     );
   });
 }
